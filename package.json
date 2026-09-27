@@ -1,0 +1,31 @@
+{
+  "name": "ferrocide",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c red,cyan \"tsx watch server/index.ts\" \"vite\"",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "assets": "node tools/prepare-assets.mjs",
+    "capture": "node tools/capture.mjs"
+  },
+  "dependencies": {
+    "@colyseus/sdk": "^0.18.4",
+    "@colyseus/ws-transport": "^0.18.4",
+    "colyseus": "^0.18.8",
+    "express": "^5.2.1",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.3",
+    "@types/three": "^0.186.0",
+    "concurrently": "^10.0.5",
+    "puppeteer-core": "^25.12.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}
