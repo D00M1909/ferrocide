@@ -36,15 +36,16 @@ export class World {
 
   constructor() {
     const s = this.scene;
-    s.fog = new THREE.Fog(0x140604, 30, 120);
-    s.background = new THREE.Color(0x080203);
+    s.fog = new THREE.Fog(0x0f0b0c, 30, 120);
+    s.background = new THREE.Color(0x060405);
 
     // ------------------------------------------------------------ lighting
-    s.add(new THREE.HemisphereLight(0xd8b8a8, 0x181010, 1.0));
-    const sun = new THREE.DirectionalLight(0xffa060, 1.5);
+    // cold ambient from the smoke-choked sky, hot key light from the furnaces
+    s.add(new THREE.HemisphereLight(0xaab4c8, 0x161214, 1.05));
+    const sun = new THREE.DirectionalLight(0xff9a50, 1.45);
     sun.position.set(-30, 60, 20);
     s.add(sun);
-    const fill = new THREE.DirectionalLight(0x6070ff, 0.35);
+    const fill = new THREE.DirectionalLight(0x5a70c0, 0.45);
     fill.position.set(40, 20, -30);
     s.add(fill);
 
@@ -104,13 +105,16 @@ export class World {
     // ------------------------------------------------------------ jump pads
     const padTex = Textures.pad();
     for (const p of JUMP_PADS) {
-      const base = new THREE.Mesh(new THREE.CylinderGeometry(p.radius, p.radius + 0.2, 0.12, 12), psxify(new THREE.MeshLambertMaterial({ color: 0x2a2020, emissive: 0x301000 })));
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(p.radius, p.radius + 0.2, 0.12, 12), psxify(new THREE.MeshLambertMaterial({ color: 0x202428, emissive: 0x002a38 })));
       base.position.set(p.pos.x, p.pos.y + 0.06, p.pos.z);
       s.add(base);
       const ring = new THREE.Mesh(
         new THREE.PlaneGeometry(p.radius * 2, p.radius * 2).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ map: padTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, color: 0xffc040 }),
+        new THREE.MeshBasicMaterial({ map: padTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, color: 0xffffff }),
       );
+      const pl = new THREE.PointLight(0x30d8ff, 6, 6, 1.5);
+      pl.position.set(p.pos.x, p.pos.y + 0.8, p.pos.z);
+      s.add(pl);
       ring.position.set(p.pos.x, p.pos.y + 0.14, p.pos.z);
       s.add(ring);
       this.padRings.push(ring);

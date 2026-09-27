@@ -1,5 +1,7 @@
 // Keyboard + mouse state with edge detection, pointer lock, and a programmatic
 // override path so the autoplay bot can drive the exact same code paths.
+// Presses are latched until the game consumes them, so a tap is never lost
+// between physics steps or during hitstop.
 
 export type Action =
   | 'forward' | 'back' | 'left' | 'right' | 'jump' | 'dash' | 'slide' | 'fire' | 'alt' | 'punch'
@@ -20,9 +22,13 @@ const BINDINGS: Record<string, Action> = {
   Tab: 'scores',
 };
 
+/** Movement actions whose presses are latched until a physics step uses them. */
+export const LATCHED: Action[] = ['jump', 'dash', 'slide'];
+
 export class Input {
   private down = new Set<Action>();
   private pressed = new Set<Action>();
+  private latched = new Map<Action, number>();
   mouseDX = 0;
   mouseDY = 0;
   locked = false;
@@ -33,9 +39,14 @@ export class Input {
   constructor(private canvas: HTMLCanvasElement) {
     window.addEventListener('keydown', (e) => {
       const a = BINDINGS[e.code];
+      // while playing, swallow browser shortcuts on game keys (Ctrl+W/S/D, Space scroll, Tab focus...)
+      if (this.locked && (a || e.ctrlKey || e.metaKey)) e.preventDefault();
       if (!a) return;
-      if (a === 'scores' || (this.locked && (e.code.startsWith('Control') || e.code === 'Space'))) e.preventDefault();
-      if (!this.down.has(a)) this.pressed.add(a);
+      if (a === 'scores') e.preventDefault();
+      if (!this.down.has(a)) {
+        this.pressed.add(a);
+        if (LATCHED.includes(a)) this.latched.set(a, performance.now());
+      }
       this.down.add(a);
     });
     window.addEventListener('keyup', (e) => {
@@ -45,7 +56,7 @@ export class Input {
     window.addEventListener('blur', () => this.down.clear());
     canvas.addEventListener('mousedown', (e) => {
       if (!this.locked) return;
-      const a: Action | null = e.button === 0 ? 'fire' : e.button === 2 ? 'alt' : e.button === 1 ? 'punch' : e.button === 3 ? 'punch' : null;
+      const a: Action | null = e.button === 0 ? 'fire' : e.button === 2 ? 'alt' : e.button === 1 || e.button === 3 ? 'punch' : null;
       if (!a) return;
       if (!this.down.has(a)) this.pressed.add(a);
       this.down.add(a);
@@ -66,10 +77,11 @@ export class Input {
     }, { passive: true });
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.canvas;
-      if (!this.locked) this.down.clear();
+      if (!this.locked) { this.down.clear(); this.latched.clear(); }
     });
   }
 
+  /** Pointer lock + (best effort) fullscreen keyboard lock so Ctrl+W can't close the tab mid-slide. */
   requestLock(): void {
     if (this.virtual) return;
     const c = this.canvas as HTMLCanvasElement & { requestPointerLock(o?: { unadjustedMovement?: boolean }): Promise<void> | void };
@@ -79,6 +91,8 @@ export class Input {
     } catch {
       c.requestPointerLock();
     }
+    const nav = navigator as Navigator & { keyboard?: { lock(keys?: string[]): Promise<void> } };
+    if (document.fullscreenElement && nav.keyboard) void nav.keyboard.lock(['KeyW', 'KeyS', 'KeyD', 'ControlLeft']).catch(() => undefined);
   }
 
   exitLock(): void {
@@ -95,6 +109,19 @@ export class Input {
     return this.enabled && this.pressed.has(a);
   }
 
+  /** Returns and clears a latched movement press (jump/dash/slide). */
+  consume(a: Action): boolean {
+    if (this.virtual) {
+      const had = this.virtual.pressed.has(a);
+      this.virtual.pressed.delete(a);
+      return had;
+    }
+    const t = this.latched.get(a);
+    this.latched.delete(a);
+    // a press stays valid for 200 ms: long enough to bridge frames/hitstop, short enough not to feel sticky
+    return this.enabled && t !== undefined && performance.now() - t < 200;
+  }
+
   consumeMouse(): [number, number] {
     if (this.virtual) {
       const r: [number, number] = [this.virtual.dx, this.virtual.dy];
@@ -106,13 +133,12 @@ export class Input {
     return r;
   }
 
-  /** Call once at the end of every frame. */
+  /** Call once at the end of every frame. Latched movement presses survive. */
   endFrame(): void {
     this.pressed.clear();
     if (this.virtual) this.virtual.pressed.clear();
   }
 
-  /** Pause-key check that works even while the pointer is unlocked. */
   pausePressed(): boolean {
     return this.pressed.has('pause');
   }

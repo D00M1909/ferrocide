@@ -2,9 +2,8 @@
 
 export const GAME_NAME = 'FERROCIDE';
 export const SERVER_TICK = 30; // Hz simulation on the authority
-export const SNAPSHOT_RATE = 20; // Hz snapshots to clients
+export const SNAPSHOT_RATE = 30; // Hz snapshots to clients (one per sim tick)
 export const PLAYER_SEND_RATE = 30; // Hz player state uploads
-export const INTERP_DELAY = 0.1; // s of buffered interpolation for remote entities
 export const MAX_PLAYERS = 2;
 
 export const PLAYER = {
@@ -41,10 +40,13 @@ export const PLAYER = {
   wallSlideSpeed: 3.5,
   lavaDps: 32,
   lavaBounce: 14,
-  respawnTime: 6,
-  bloodHealRange: 6.5,
-  bloodHealFactor: 0.4,
+  respawnTime: 10,
+  bloodHealRange: 5,
+  bloodHealFactor: 0.32,
+  hardDamageFraction: 0.35, // share of every hit that can't be healed back right away
   hardDamageDelay: 1.2,
+  hardDamageDecay: 25, // hp/s once the delay passes
+  airSpeedCap: 38, // strafing can't accelerate you past this
 };
 
 export type WeaponId = 'revolver' | 'shotgun' | 'launcher';
@@ -75,10 +77,11 @@ export const WEAPONS = {
     coreCooldown: 2.8,
     coreSpeed: 26,
     coreFuse: 1.4,
-    coreRadius: 5,
-    coreDamage: 70,
-    coreShotRadius: 8.5,
-    coreShotDamage: 160,
+    coreRadius: 4.5,
+    coreDamage: 60,
+    coreShotRadius: 6.5,
+    coreShotDamage: 120,
+    coreSelfDamage: 8,
   },
   launcher: {
     name: 'SLAGTHROWER',
@@ -132,35 +135,35 @@ export const ENEMIES: Record<EnemyKind, EnemyDef> = {
   warden: { name: 'WARDEN', hp: 120, speed: 6, radius: 0.8, height: 2.3, flying: false, headY: 1.9, headR: 0.45, score: 100, heavy: false },
   drone: { name: 'SENTRY DRONE', hp: 65, speed: 9, radius: 0.6, height: 1.1, flying: true, headY: 0.55, headR: 0.4, score: 90, heavy: false },
   brute: { name: 'BRUTE', hp: 520, speed: 5.5, radius: 1.5, height: 4.2, flying: false, headY: 3.5, headR: 0.8, score: 250, heavy: true },
-  colossus: { name: 'THE FOUNDRY COLOSSUS', hp: 3200, speed: 4.2, radius: 2.6, height: 7.4, flying: false, headY: 6.2, headR: 1.3, score: 1500, heavy: true },
+  colossus: { name: 'THE FOUNDRY COLOSSUS', hp: 4500, speed: 4.2, radius: 2.6, height: 7.4, flying: false, headY: 6.2, headR: 1.3, score: 1500, heavy: true },
 };
 
 export const ENEMY_ATTACKS = {
-  husk: { range: 2.4, windup: 0.38, recover: 0.55, damage: 18, lunge: 9 },
+  husk: { range: 2.6, windup: 0.42, recover: 0.55, damage: 18, lunge: 14, parryWindow: 0.3 },
   eye: { range: 1.6, damage: 14, diveSpeed: 22, windup: 0.5 },
   warden: { windup: 0.7, cooldown: 2.4, orbSpeed: 17, orbDamage: 22, preferredMin: 13, preferredMax: 26 },
-  drone: { windup: 0.55, cooldown: 2.6, burst: 3, burstGap: 0.14, boltSpeed: 38, boltDamage: 9 },
+  drone: { windup: 0.55, cooldown: 2.6, burst: 3, burstGap: 0.14, boltSpeed: 46, boltDamage: 9, lead: 0.6 },
   brute: { stompWindup: 0.9, stompDamage: 26, waveSpeed: 17, waveRange: 26, mortarWindup: 0.8, mortarDamage: 30, mortarRadius: 4.5, cooldown: 2.6, meleeRange: 4.2, meleeDamage: 35 },
-  colossus: { beamWindup: 1.3, beamTime: 2.2, beamDps: 70, beamSweep: 1.4, summonEvery: 14 },
+  colossus: { beamWindup: 1.3, beamTime: 2.2, beamDps: 70, beamSweep: 1.4, summonEvery: 14, ringOrbs: 14, ringSpeed: 13 },
 };
 
 export type ProjectileKind = 'orb' | 'bolt' | 'mortar' | 'reflected';
 
 export const PROJECTILES: Record<ProjectileKind, { radius: number; gravity: number; parryable: boolean; life: number }> = {
   orb: { radius: 0.45, gravity: 0, parryable: true, life: 6 },
-  bolt: { radius: 0.2, gravity: 0, parryable: false, life: 3 },
+  bolt: { radius: 0.25, gravity: 0, parryable: true, life: 3 },
   mortar: { radius: 0.6, gravity: 20, parryable: true, life: 6 },
   reflected: { radius: 0.6, gravity: 0, parryable: false, life: 3 },
 };
 
-/** Style ranks — our own names, bottom to top. */
+/** Style ranks — FERROCIDE's own ladder (the HUD shows the word, not a letter). */
 export const RANKS = [
-  { letter: 'D', name: 'DENTED', color: '#8a8f99' },
-  { letter: 'C', name: 'CRUDE', color: '#4fb3ff' },
-  { letter: 'B', name: 'BUTCHER', color: '#48e07a' },
-  { letter: 'A', name: 'ATROCITY', color: '#ffd23f' },
-  { letter: 'S', name: 'SAVAGE', color: '#ff8a2a' },
-  { letter: 'SS', name: 'SLAUGHTER', color: '#ff4a2a' },
-  { letter: 'SSS', name: 'SCRAPSTORM', color: '#ff2255' },
-  { letter: 'F', name: 'FERROCIDE', color: '#ffffff' },
+  { letter: 'I', name: 'SCRAP', color: '#8a8f99' },
+  { letter: 'II', name: 'IRON', color: '#9fb4c8' },
+  { letter: 'III', name: 'STEEL', color: '#5fc8ff' },
+  { letter: 'IV', name: 'CHROME', color: '#7dffb0' },
+  { letter: 'V', name: 'MOLTEN', color: '#ffb03a' },
+  { letter: 'VI', name: 'INFERNAL', color: '#ff5a2a' },
+  { letter: 'VII', name: 'CATACLYSM', color: '#ff2255' },
+  { letter: 'VIII', name: 'FERROCIDE', color: '#ffffff' },
 ];

@@ -128,6 +128,8 @@ class ParticleSystem {
 }
 
 interface Gib {
+  color: THREE.Color;
+  stretch: THREE.Vector3;
   pos: THREE.Vector3;
   vel: THREE.Vector3;
   rot: THREE.Euler;
@@ -142,9 +144,16 @@ interface Tracer {
   mesh: THREE.Mesh;
   life: number;
   max: number;
+  end: THREE.Vector3;
+  follow: (() => Vec3) | null; // re-anchor the start to the moving gun muzzle
 }
 
 const C = (hex: number) => new THREE.Color(hex);
+const GIB_MEAT = new THREE.Color(0x7a1010);
+const GIB_DARK = new THREE.Color(0x3a0606);
+const GIB_BONE = new THREE.Color(0xd8ccb4);
+const GIB_METAL = new THREE.Color(0x5a5a62);
+
 export const COLORS = {
   blood: C(0x8a0010),
   bloodBright: C(0xd0001a),
@@ -153,6 +162,8 @@ export const COLORS = {
   smoke: C(0x201814),
   smokeLight: C(0x5a4a40),
   gold: C(0xffd040),
+  silver: C(0xe8eef8),
+  cyan: C(0x40e0ff),
   white: C(0xffffff),
   red: C(0xff2020),
   parry: C(0xfff4b0),
@@ -214,14 +225,16 @@ export class FX {
       m.visible = false;
       m.frustumCulled = false;
       this.group.add(m);
-      this.tracers.push({ mesh: m, life: 0, max: 1 });
+      this.tracers.push({ mesh: m, life: 0, max: 1, end: new THREE.Vector3(), follow: null });
     }
     // gibs
+    // irregular low-poly chunks, individually tinted (meat / blood / bone, or scrap metal)
     this.gibMesh = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshLambertMaterial({ color: 0x7a0a0a, emissive: 0x200000 }),
+      new THREE.DodecahedronGeometry(0.62, 0),
+      new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x100000 }),
       220,
     );
+    this.gibMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(220 * 3), 3);
     this.gibMesh.count = 0;
     this.gibMesh.frustumCulled = false;
     this.group.add(this.gibMesh);
@@ -311,8 +324,10 @@ export class FX {
     if (Math.random() < 0.5) this.sys.smoke.emit(p, randDir(0.3), 0.6, size * 0.6, size * 2, COLORS.smoke, 0.35, -0.5, 1);
   }
 
-  tracer(a: Vec3, b: Vec3, color = 0xfff0a0, width = 0.035, life = 0.09): void {
+  tracer(a: Vec3, b: Vec3, color = 0xfff0a0, width = 0.035, life = 0.09, follow: (() => Vec3) | null = null): void {
     const t = this.tracers.find((x) => x.life <= 0) ?? this.tracers[0];
+    t.end.set(b.x, b.y, b.z);
+    t.follow = follow;
     const len = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
     t.mesh.position.set(a.x, a.y, a.z);
     t.mesh.lookAt(b.x, b.y, b.z);
@@ -348,14 +363,20 @@ export class FX {
     }
   }
 
-  gibBurst(p: Vec3, n: number, force = 9, scale = 0.22): void {
+  gibBurst(p: Vec3, n: number, force = 9, scale = 0.22, palette: 'flesh' | 'metal' = 'flesh'): void {
     const floorHit = raycastWorld(p, { x: 0, y: -1, z: 0 }, 30);
     const floor = floorHit ? p.y - floorHit.dist : 0;
     for (let i = 0; i < n; i++) {
       if (this.gibs.length >= 220) this.gibs.shift();
       const v = randDir(force * (0.4 + Math.random()));
       v.y = Math.abs(v.y) * 0.9 + 3;
+      const r = Math.random();
+      const color = palette === 'metal'
+        ? (r < 0.6 ? GIB_METAL : r < 0.85 ? GIB_DARK : GIB_MEAT).clone().multiplyScalar(0.8 + Math.random() * 0.4)
+        : (r < 0.55 ? GIB_MEAT : r < 0.85 ? GIB_DARK : GIB_BONE).clone().multiplyScalar(0.8 + Math.random() * 0.4);
       this.gibs.push({
+        color,
+        stretch: new THREE.Vector3(0.6 + Math.random() * 0.9, 0.5 + Math.random() * 0.7, 0.6 + Math.random() * 0.9),
         pos: new THREE.Vector3(p.x + (Math.random() - 0.5) * 0.5, p.y + (Math.random() - 0.5) * 0.5, p.z + (Math.random() - 0.5) * 0.5),
         vel: new THREE.Vector3(v.x, v.y, v.z),
         rot: new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6),
@@ -401,6 +422,12 @@ export class FX {
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
       t.life -= dt;
+      if (t.follow) {
+        const a = t.follow();
+        t.mesh.position.set(a.x, a.y, a.z);
+        t.mesh.lookAt(t.end);
+        t.mesh.scale.z = t.mesh.position.distanceTo(t.end);
+      }
       const m = t.mesh.material as THREE.MeshBasicMaterial;
       m.opacity = Math.max(0, t.life / t.max);
       if (t.life <= 0) t.mesh.visible = false;
@@ -437,12 +464,14 @@ export class FX {
       g.rot.x += g.spin.x * dt; g.rot.y += g.spin.y * dt; g.rot.z += g.spin.z * dt;
       this.dummy.position.copy(g.pos);
       this.dummy.rotation.copy(g.rot);
-      this.dummy.scale.setScalar(g.scale * Math.min(1, g.life));
+      this.dummy.scale.copy(g.stretch).multiplyScalar(g.scale * Math.min(1, g.life));
       this.dummy.updateMatrix();
+      this.gibMesh.setColorAt(n, g.color);
       this.gibMesh.setMatrixAt(n++, this.dummy.matrix);
     }
     this.gibMesh.count = n;
     this.gibMesh.instanceMatrix.needsUpdate = true;
+    if (this.gibMesh.instanceColor) this.gibMesh.instanceColor.needsUpdate = true;
   }
 
   clear(): void {

@@ -31,7 +31,7 @@ export interface WeaponCtx {
   damage(v: EnemyView, dmg: number, kind: HitKind, head: boolean, point: Vec3, dir: Vec3, extra?: { rc?: number }): void;
   /** Area damage + knockback on the local player. */
   explode(p: Vec3, r: number, dmg: number, kind: HitKind, selfForce: number, selfDmg: number): void;
-  parry(id: number, dir: Vec3): void;
+  parry(id: number, dir: Vec3, at: Vec3): void;
   sendFx(m: FxMsg): void;
   style(label: string, pts: number, big?: boolean): void;
 }
@@ -45,9 +45,10 @@ const v3 = (p: Vec3): V => [Math.round(p.x * 100) / 100, Math.round(p.y * 100) /
 interface ViewDef { model: 'revolver_a' | 'shotgun_b' | 'rocket_launcher'; length: number; offset: THREE.Vector3; rot: THREE.Euler; muzzle: THREE.Vector3; kick: number }
 
 const VIEW: Record<WeaponId, ViewDef> = {
-  revolver: { model: 'revolver_a', length: 0.42, offset: new THREE.Vector3(0.24, -0.22, -0.46), rot: new THREE.Euler(0, Math.PI / 2, 0), muzzle: new THREE.Vector3(0, 0.035, -0.26), kick: 1 },
-  shotgun: { model: 'shotgun_b', length: 0.78, offset: new THREE.Vector3(0.26, -0.26, -0.52), rot: new THREE.Euler(0, Math.PI / 2, 0), muzzle: new THREE.Vector3(0, 0.03, -0.45), kick: 1.6 },
-  launcher: { model: 'rocket_launcher', length: 0.85, offset: new THREE.Vector3(0.3, -0.24, -0.5), rot: new THREE.Euler(0, Math.PI / 2, 0), muzzle: new THREE.Vector3(0, 0.05, -0.48), kick: 1.3 },
+  // models are auto-oriented on load (barrel -> -Z, grip -> -Y); rot is a small artistic cant
+  revolver: { model: 'revolver_a', length: 0.36, offset: new THREE.Vector3(0.2, -0.2, -0.44), rot: new THREE.Euler(0.04, -0.06, 0), muzzle: new THREE.Vector3(0, 0.03, -0.2), kick: 1 },
+  shotgun: { model: 'shotgun_b', length: 0.7, offset: new THREE.Vector3(0.22, -0.24, -0.5), rot: new THREE.Euler(0.04, -0.05, 0), muzzle: new THREE.Vector3(0, 0.03, -0.36), kick: 1.6 },
+  launcher: { model: 'rocket_launcher', length: 0.55, offset: new THREE.Vector3(0.28, -0.23, -0.56), rot: new THREE.Euler(0.03, -0.05, 0), muzzle: new THREE.Vector3(0, 0.04, -0.3), kick: 1.3 },
 };
 
 export class Weapons {
@@ -61,7 +62,9 @@ export class Weapons {
   private muzzleFlash: THREE.Sprite;
   private flashT = 0;
   private switchT = 0;
-  private cooldown = 0;
+  private equipT = 0;
+  private pumpT = 0;
+  private cooldowns: Record<WeaponId, number> = { revolver: 0, shotgun: 0, launcher: 0 };
   private punchCd = 0;
   punchT = 0;
   coins: number = WEAPONS.revolver.coinCharges;
@@ -78,7 +81,7 @@ export class Weapons {
   private rockets: Rocket[] = [];
   private nextId = 1;
   private coinGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.03, 8);
-  private coinMat = new THREE.MeshBasicMaterial({ color: 0xffd040 });
+  private coinMat = new THREE.MeshBasicMaterial({ color: 0xe8eef8 });
   private coreMat = new THREE.MeshBasicMaterial({ color: 0x60d0ff });
   private rocketMat = new THREE.MeshBasicMaterial({ color: 0x3a3230 });
   private recentKillWeapons: { w: WeaponId; t: number }[] = [];
@@ -86,8 +89,8 @@ export class Weapons {
 
   constructor(private world: THREE.Scene, private selfId: () => string) {
     this.vmCam = new THREE.PerspectiveCamera(62, 1, 0.01, 10);
-    this.vmScene.add(new THREE.HemisphereLight(0xffb090, 0x301010, 1.4));
-    const key = new THREE.DirectionalLight(0xffa060, 2.2);
+    this.vmScene.add(new THREE.HemisphereLight(0xd0d8e8, 0x302020, 2.2));
+    const key = new THREE.DirectionalLight(0xffb070, 3);
     key.position.set(-1, 2, 1);
     this.vmScene.add(key);
     this.vmScene.add(this.holder);
@@ -110,9 +113,31 @@ export class Weapons {
     m.rotation.copy(def.rot);
     const g = new THREE.Object3D();
     g.add(m);
+    g.add(this.buildHand(w));
     g.visible = false;
     this.holder.add(g);
     return g;
+  }
+
+  /** Gloved mechanical hand + forearm gripping each gun from below. */
+  private buildHand(w: WeaponId): THREE.Object3D {
+    const glove = new THREE.MeshLambertMaterial({ color: 0x2c2426 });
+    const metal = new THREE.MeshLambertMaterial({ color: 0x6a5e5a });
+    const glow = new THREE.MeshBasicMaterial({ color: 0xff4020 });
+    const hand = new THREE.Group();
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.09, 0.1), glove);
+    const fingers = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.035, 0.07), glove);
+    fingers.position.set(-0.02, 0.03, -0.06);
+    const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.085, 0.34), metal);
+    forearm.position.set(0.02, -0.05, 0.2);
+    forearm.rotation.x = 0.35;
+    const vent = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.012, 0.12), glow);
+    vent.position.set(0.02, -0.005, 0.2);
+    vent.rotation.x = 0.35;
+    hand.add(palm, fingers, forearm, vent);
+    const grip = w === 'revolver' ? [0.0, -0.07, 0.06] : w === 'shotgun' ? [0.0, -0.08, 0.14] : [0.0, -0.09, 0.08];
+    hand.position.set(grip[0], grip[1], grip[2]);
+    return hand;
   }
 
   /** A chunky mechanical left arm for punches and parries. */
@@ -138,7 +163,8 @@ export class Weapons {
     if (w === this.current && !instant) return;
     if (w !== this.current) this.last = this.current;
     this.current = w;
-    this.switchT = instant ? 0 : 0.22;
+    this.switchT = instant ? 0 : 0.06;
+    this.equipT = instant ? 0 : 0.28;
     for (const k of WEAPON_ORDER) this.models[k].visible = k === w;
   }
 
@@ -153,8 +179,11 @@ export class Weapons {
 
   // ------------------------------------------------------------------ update
 
-  update(dt: number, input: Input, ctx: WeaponCtx, mouse: [number, number]): void {
-    this.cooldown = Math.max(0, this.cooldown - dt);
+  /** dt = world time (slowed by hitstop), realDt = wall time (cooldowns keep ticking). */
+  update(dt: number, realDt: number, input: Input, ctx: WeaponCtx, mouse: [number, number]): void {
+    for (const k of WEAPON_ORDER) this.cooldowns[k] = Math.max(0, this.cooldowns[k] - realDt);
+    this.equipT = Math.max(0, this.equipT - realDt);
+    this.pumpT = Math.max(0, this.pumpT - realDt);
     this.punchCd = Math.max(0, this.punchCd - dt);
     this.coreCd = Math.max(0, this.coreCd - dt);
     this.switchT = Math.max(0, this.switchT - dt);
@@ -174,7 +203,7 @@ export class Weapons {
       }
       if (input.wasPressed('punch')) this.punch(ctx);
       if (this.switchT <= 0) {
-        if (input.isDown('fire') && this.cooldown <= 0) this.fire(ctx);
+        if (input.isDown('fire') && this.cooldowns[this.current] <= 0) this.fire(ctx);
         if (input.wasPressed('alt')) this.alt(ctx);
       }
     }
@@ -195,18 +224,23 @@ export class Weapons {
     this.shotsFired++;
     const w = this.current;
     if (w === 'revolver') {
-      this.cooldown = WEAPONS.revolver.interval;
+      this.cooldowns.revolver = WEAPONS.revolver.interval;
       this.recoil = 1; this.recoilRot = 1; this.spin += Math.PI / 3;
-      ctx.audio.play('revolver', { volume: 0.85, variance: 0.05 });
+      ctx.fx.flashLight(this.muzzleWorld(ctx), 0xffc070, 4, 12, 0.06);
+      ctx.audio.play('revolver', { volume: 0.85, variance: 0.05, reverb: 0.3 });
+      ctx.audio.synth('thump', 0.55);
       ctx.fx.shake(0.12);
       this.flash(0.05, 0.28);
       const to = this.hitscan(ctx, ctx.eye, ctx.fwd, WEAPONS.revolver.damage, 'revolver', WEAPONS.revolver.pierce, 0xfff0a0, 0.035);
       ctx.sendFx({ t: 'shot', w: 'revolver', from: v3(this.muzzleWorld(ctx)), to: [v3(to)] });
     } else if (w === 'shotgun') {
       const S = WEAPONS.shotgun;
-      this.cooldown = S.interval;
+      this.cooldowns.shotgun = S.interval;
       this.recoil = 1.6; this.recoilRot = 1.6;
-      ctx.audio.play('shotgun', { volume: 1, variance: 0.06 });
+      this.pumpT = 0.5;
+      ctx.fx.flashLight(this.muzzleWorld(ctx), 0xffb050, 6, 14, 0.08);
+      ctx.audio.play('shotgun', { volume: 1, variance: 0.06, reverb: 0.4 });
+      ctx.audio.synth('thump', 1);
       setTimeout(() => ctx.audio.play('pump', { volume: 0.5 }), 380);
       ctx.fx.shake(0.28);
       this.flash(0.07, 0.5);
@@ -228,15 +262,17 @@ export class Weapons {
           ctx.fx.sparks(res.end, 2, 5, COLORS.spark, 0.08);
           if (i % 3 === 0) ctx.fx.decal(res.end, res.wall.normal, 0.25, 'scorch');
         }
-        if (i < 5) { ctx.fx.tracer(muzzle, res.end, 0xffd080, 0.02, 0.06); tos.push(v3(res.end)); }
+        if (i < 5) { ctx.fx.tracer(muzzle, res.end, 0xffd080, 0.02, 0.06, () => this.muzzleWorld(ctx)); tos.push(v3(res.end)); }
       }
       for (const [view, h] of agg) ctx.damage(view, h.dmg, 'shotgun', h.head, h.point, ctx.fwd);
       ctx.sendFx({ t: 'shot', w: 'shotgun', from: v3(muzzle), to: tos });
     } else {
       const L = WEAPONS.launcher;
-      this.cooldown = L.interval;
+      this.cooldowns.launcher = L.interval;
       this.recoil = 1.3; this.recoilRot = 0.8;
-      ctx.audio.play('rocket', { volume: 0.9 });
+      ctx.fx.flashLight(this.muzzleWorld(ctx), 0xff9040, 5, 12, 0.1);
+      ctx.audio.play('rocket', { volume: 0.9, reverb: 0.3 });
+      ctx.audio.synth('thump', 0.7);
       ctx.fx.shake(0.18);
       this.flash(0.08, 0.6);
       const p = this.muzzleWorld(ctx);
@@ -297,15 +333,10 @@ export class Weapons {
       const pr = cands[0];
       const aim = this.aimPoint(ctx, 200);
       const dir = aim.sub(pr.pos).normalize();
-      ctx.parry(pr.id, dir);
-      ctx.hazards.hide(pr.id);
-      ctx.fx.freeze(0.13);
+      ctx.parry(pr.id, dir, this.aimPoint(ctx, 200));
+      ctx.hazards.markParried(pr.id);
       ctx.fx.glow(pr.pos, 3.5, COLORS.parry, 0.25);
       ctx.fx.sparks(pr.pos, 30, 14, COLORS.parry, 0.15);
-      ctx.audio.play('parry', { volume: 1.1 });
-      ctx.audio.duck(0.2, 0.35);
-      ctx.fx.shake(0.4);
-      ctx.style('PARRY', 150, true);
       return;
     }
     // punch the nearest enemy in front of us
@@ -389,7 +420,7 @@ export class Weapons {
     const hits = ctx.enemies.raycast(o, d, limit).slice(0, pierce);
     const muzzle = this.muzzleWorld(ctx);
     if (coin && (!hits.length || hits[0].dist > limit - 0.01)) {
-      ctx.fx.tracer(muzzle, coin.pos, color, width, 0.12);
+      ctx.fx.tracer(muzzle, coin.pos, color, width, 0.12, () => this.muzzleWorld(ctx));
       this.ricochet(ctx, coin, dmg * WEAPONS.revolver.ricochetMult, 1, [muzzle.clone(), coin.pos.clone()]);
       return coin.pos.clone();
     }
@@ -406,7 +437,7 @@ export class Weapons {
       ctx.audio.play('metal_light', { at: end, volume: 0.5 });
     }
     if (hits.length && hits.length >= pierce) end = new THREE.Vector3(hits[hits.length - 1].point.x, hits[hits.length - 1].point.y, hits[hits.length - 1].point.z);
-    ctx.fx.tracer(muzzle, end, color, width, 0.09);
+    ctx.fx.tracer(muzzle, end, color, width, 0.09, () => this.muzzleWorld(ctx));
     return end;
   }
 
@@ -415,8 +446,8 @@ export class Weapons {
     this.removeCoin(coin);
     ctx.sendFx({ t: 'coinhit', id: coin.id });
     ctx.audio.play('coin', { at: coin.pos, volume: 1, pitch: 1.4 + chain * 0.15 });
-    ctx.fx.glow(coin.pos, 1.6, COLORS.gold, 0.2);
-    ctx.fx.sparks(coin.pos, 12, 8, COLORS.gold, 0.1);
+    ctx.fx.glow(coin.pos, 1.6, COLORS.silver, 0.2);
+    ctx.fx.sparks(coin.pos, 12, 8, COLORS.silver, 0.1);
     ctx.fx.freeze(0.035);
     // next coin in range and sight
     let next: Coin | null = null, nd = 40;
@@ -426,7 +457,7 @@ export class Weapons {
       if (d < nd && lineOfSight(coin.pos, c.pos)) { nd = d; next = c; }
     }
     if (next) {
-      ctx.fx.tracer(coin.pos, next.pos, 0xffd040, 0.05, 0.25);
+      ctx.fx.tracer(coin.pos, next.pos, 0xe0f0ff, 0.05, 0.25);
       pts.push(next.pos.clone());
       this.ricochet(ctx, next, dmg * WEAPONS.revolver.ricochetMult, chain + 1, pts);
       return;
@@ -443,7 +474,7 @@ export class Weapons {
     }
     if (target) {
       const h = target.headPos();
-      ctx.fx.tracer(coin.pos, h, 0xffe070, 0.07, 0.3);
+      ctx.fx.tracer(coin.pos, h, 0xe0f0ff, 0.07, 0.3);
       pts.push(h.clone());
       const dir = h.clone().sub(coin.pos).normalize();
       ctx.damage(target, dmg * WEAPONS.revolver.headshotMult, 'ricoshot', true, h, dir, { rc: chain });
@@ -452,7 +483,7 @@ export class Weapons {
       const d = new THREE.Vector3(Math.random() - 0.5, -0.3, Math.random() - 0.5).normalize();
       const w = raycastWorld(coin.pos, d, 60);
       const end = coin.pos.clone().addScaledVector(d, w ? w.dist : 60);
-      ctx.fx.tracer(coin.pos, end, 0xffe070, 0.05, 0.2);
+      ctx.fx.tracer(coin.pos, end, 0xe0f0ff, 0.05, 0.2);
       pts.push(end);
     }
     ctx.sendFx({ t: 'ricochet', pts: pts.map(v3) });
@@ -465,7 +496,7 @@ export class Weapons {
     const disc = new THREE.Mesh(this.coinGeo, this.coinMat);
     disc.rotation.x = Math.PI / 2;
     mesh.add(disc);
-    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: sprite('light_01'), color: 0xffc030, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.7 }));
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: sprite('light_01'), color: 0xc8e0ff, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.8 }));
     glow.scale.setScalar(0.9);
     mesh.add(glow);
     mesh.position.set(p.x, p.y, p.z);
@@ -492,7 +523,7 @@ export class Weapons {
       const dir = c.vel.clone().normalize();
       const w = raycastWorld(c.pos, dir, step + 0.1);
       if (w || c.life <= 0) {
-        if (w) ctx.fx.sparks(c.pos, 4, 3, COLORS.gold, 0.06);
+        if (w) ctx.fx.sparks(c.pos, 4, 3, COLORS.silver, 0.06);
         this.removeCoin(c);
         continue;
       }
@@ -531,7 +562,7 @@ export class Weapons {
     this.removeCore(c);
     const S = WEAPONS.shotgun;
     const r = shot ? S.coreShotRadius : S.coreRadius;
-    ctx.explode(c.pos, r, shot ? S.coreShotDamage : S.coreDamage, 'core', shot ? 20 : 14, 0);
+    ctx.explode(c.pos, r, shot ? S.coreShotDamage : S.coreDamage, 'core', shot ? 20 : 14, S.coreSelfDamage);
     ctx.fx.explosion(c.pos, r * 0.8, COLORS.blue);
     ctx.sendFx({ t: 'coredie', id: c.id });
     if (shot) { ctx.fx.freeze(0.06); ctx.style('CORE DETONATED', 60); }
@@ -654,7 +685,7 @@ export class Weapons {
       case 'coin': this.spawnCoin(m.id, P(m.p), P(m.v), false, from); audio.play('coin', { at: P(m.p), volume: 0.5 }); break;
       case 'coinhit': this.removeRemoteCoin(from, m.id); break;
       case 'ricochet':
-        for (let i = 0; i + 1 < m.pts.length; i++) fx.tracer(P(m.pts[i]), P(m.pts[i + 1]), 0xffe070, 0.06, 0.25);
+        for (let i = 0; i + 1 < m.pts.length; i++) fx.tracer(P(m.pts[i]), P(m.pts[i + 1]), 0xe0f0ff, 0.06, 0.25);
         audio.play('coin', { at: P(m.pts[Math.min(1, m.pts.length - 1)]), volume: 0.8, pitch: 1.5 });
         break;
       case 'rocket': this.spawnRocket(m.id, P(m.p), P(m.v), false, from); audio.play('rocket', { at: P(m.p), volume: 0.6 }); break;
@@ -706,10 +737,11 @@ export class Weapons {
     this.tilt += (wantTilt - this.tilt) * Math.min(1, dt * 10);
     this.recoil = Math.max(0, this.recoil - dt * 7);
     this.recoilRot = Math.max(0, this.recoilRot - dt * 6);
-    const sw = this.switchT > 0 ? this.switchT / 0.22 : 0;
+    const sw = this.equipT > 0 ? Math.pow(this.equipT / 0.28, 2) : 0;
+    const pump = this.current === 'shotgun' && this.pumpT > 0 ? Math.sin(Math.min(1, (0.5 - this.pumpT) / 0.35) * Math.PI) : 0;
     const air = mv.grounded ? 0 : Math.max(-0.03, Math.min(0.03, -mv.vel.y * 0.0015));
-    m.position.set(def.offset.x + this.sway.x + bx, def.offset.y + this.sway.y + by - sw * 0.35 + air, def.offset.z + this.recoil * 0.07 * def.kick);
-    m.rotation.set(this.recoilRot * 0.22 * def.kick - sw * 0.8, this.sway.x * 2, this.tilt);
+    m.position.set(def.offset.x + this.sway.x + bx - sw * 0.05, def.offset.y + this.sway.y + by - sw * 0.3 + air - pump * 0.03, def.offset.z + this.recoil * 0.07 * def.kick + pump * 0.06);
+    m.rotation.set(this.recoilRot * 0.22 * def.kick - sw * 0.9 + pump * 0.18, this.sway.x * 2 + sw * 0.5, this.tilt - pump * 0.25);
     // revolver cylinder "spin" is faked with a quick roll twitch
     if (this.current === 'revolver') m.rotation.z += Math.sin(this.spin) * 0.02;
     this.flashT = Math.max(0, this.flashT - dt);

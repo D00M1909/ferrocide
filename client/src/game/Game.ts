@@ -1,7 +1,7 @@
 // The orchestrator: owns the render loop, the local player, and routes network
 // snapshots/events to the enemy, hazard, weapon, FX, HUD and audio systems.
 import * as THREE from 'three';
-import { ENEMIES, PLAYER, SLAM, WEAPON_ORDER, PLAYER_SEND_RATE } from '../../../shared/constants';
+import { ENEMIES, PLAYER, PLAYER_SEND_RATE, SLAM, WEAPON_ORDER } from '../../../shared/constants';
 import { Motor, type MoveInput } from '../../../shared/movement';
 import { PF, type GameEvent, type HitKind, type Phase, type PlayerStats, type Snapshot, type V } from '../../../shared/protocol';
 import { WAVES } from '../../../shared/waves';
@@ -43,7 +43,7 @@ export class Game {
   private motor = new Motor();
   private snaps = new SnapBuffer();
   private remotes = new Map<string, RemotePlayer>();
-  private names = new Map<string, string>();
+  readonly names = new Map<string, string>();
   link: NetLink | null = null;
   private bot: Bot | null = null;
 
@@ -52,12 +52,12 @@ export class Game {
   yaw = 0;
   pitch = 0;
   hp = PLAYER.maxHealth;
+  hard = 0;
   alive = true;
   phase: Phase = 'lobby';
   wave = 0;
   waveLeft = 0;
   phaseTimer = 0;
-  private waveTitle = '';
   private time = 0;
   private acc = 0;
   private sendAcc = 0;
@@ -71,17 +71,19 @@ export class Game {
   private hurtFlash = 0;
   private flashAmt = 0;
   private flashColor = new THREE.Color();
+  private viewLag = 0; // hitstop freezes the rendered world, then it catches up
   private lastRaf = 0;
   private running = false;
   private tmpEye = new THREE.Vector3();
   private fwd = new THREE.Vector3();
   private right = new THREE.Vector3();
   private up = new THREE.Vector3();
-  private musicTrack = 0;
   onGameOver: ((info: GameOverInfo) => void) | null = null;
   onPause: ((paused: boolean) => void) | null = null;
   onDisconnect: ((reason: string) => void) | null = null;
   onPhase: ((phase: Phase) => void) | null = null;
+  onReset: (() => void) | null = null;
+  onConnection: ((ok: boolean) => void) | null = null;
   fps = 0;
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement, readonly audio: Audio, readonly input: Input, public settings: Settings) {
@@ -156,17 +158,19 @@ export class Game {
     link.handlers.snap = (s) => this.onSnap(s);
     link.handlers.events = (e) => this.onEvents(e);
     link.handlers.disconnect = (r) => this.onDisconnect?.(r);
+    link.handlers.drop = () => this.onConnection?.(false);
+    link.handlers.reconnect = () => this.onConnection?.(true);
     this.motor.reset({ x: players.findIndex((p) => p.id === link.id) === 1 ? 2.5 : -2.5, y: 1.2, z: 3 });
     this.yaw = 0;
     this.pitch = 0;
     this.hp = PLAYER.maxHealth;
+    this.hard = 0;
     this.alive = true;
     this.style.reset();
     this.style.total = 0;
     this.hud.show(true);
     this.bot = opts.bot ? new Bot(this.input) : null;
     this.input.enabled = true;
-    this.musicTrack = 0;
     void this.audio.playMusic('combat1');
     this.audio.setIntensity(0.1);
   }
@@ -209,12 +213,11 @@ export class Game {
     this.wave = s.wave;
     this.waveLeft = s.left;
     this.phaseTimer = s.timer;
-    if (!this.waveTitle && s.wave > 0) this.waveTitle = WAVES[s.wave - 1]?.title ?? '';
-    // remote players present/absent
     const seen = new Set<string>();
     for (const p of s.pl) {
       if (p[0] === this.selfId) {
         this.hp = p[11];
+        this.hard = p[13] ?? 0;
         continue;
       }
       seen.add(p[0]);
@@ -228,8 +231,16 @@ export class Game {
     const me = this.selfId;
     for (const e of list) {
       switch (e.t) {
-        case 'spawn': case 'dmg': case 'atk': case 'stun': case 'enrage':
+        case 'spawn': case 'dmg': case 'atk': case 'enrage':
           this.enemies.onEvent(e, now);
+          break;
+        case 'stun':
+          this.enemies.onEvent(e, now);
+          if (e.by === me) { this.style.add('INTERRUPTED', 110, true); this.fx.freeze(0.06); }
+          break;
+        case 'mparry':
+          this.enemies.onEvent(e, now);
+          if (e.by === me) this.parryFeedback(null, true);
           break;
         case 'kill':
           this.enemies.onEvent(e, now);
@@ -239,11 +250,12 @@ export class Game {
           this.hazards.onEvent(e, this.probe());
           break;
         case 'phurt':
-          if (e.pid === me) this.onHurt(e.d, e.hp);
+          if (e.pid === me) this.onHurt(e.d, e.hp, e.hard);
           break;
         case 'heal':
           if (e.pid === me) {
             this.hp = e.hp;
+            this.hard = e.hard;
             if (e.amt >= 8) this.audio.synth('heal', 0.5);
           }
           break;
@@ -255,12 +267,11 @@ export class Game {
           if (e.pid === me) this.onRespawn({ x: e.p[0], y: e.p[1], z: e.p[2] });
           break;
         case 'wave': {
-          this.waveTitle = e.title;
           this.hud.showBanner(e.boss ? 'WARNING' : `WAVE ${e.n}`, e.title, 2.6);
           this.audio.play('door', { volume: 0.8, pitch: 0.6 });
           this.audio.synth('charge', 0.6);
           if (e.boss) void this.audio.playMusic('boss');
-          else if (e.n === 4 || e.n === 1) { this.musicTrack = e.n === 4 ? 1 : 0; void this.audio.playMusic(this.musicTrack ? 'combat2' : 'combat1'); }
+          else if (e.n === 1 || e.n === 5) void this.audio.playMusic(e.n >= 5 ? 'combat2' : 'combat1');
           break;
         }
         case 'clear':
@@ -285,6 +296,8 @@ export class Game {
           this.weapons.clear();
           this.style.reset();
           this.hud.showBanner('RETRY', `WAVE ${e.wave}`, 2);
+          this.onReset?.();
+          void this.audio.playMusic(e.wave >= WAVES.length ? 'boss' : e.wave >= 5 ? 'combat2' : 'combat1');
           break;
         case 'join':
           this.names.set(e.pid, e.name);
@@ -309,8 +322,9 @@ export class Game {
 
   // ------------------------------------------------------------------ player feedback
 
-  private onHurt(d: number, hp: number): void {
+  private onHurt(d: number, hp: number, hard: number): void {
     this.hp = hp;
+    this.hard = hard;
     this.hurtFlash = Math.min(1, this.hurtFlash + 0.35 + d / 60);
     this.fx.shake(Math.min(0.6, 0.2 + d / 60));
     this.style.hurt(d);
@@ -332,21 +346,36 @@ export class Game {
     this.motor.reset(p);
     this.alive = true;
     this.hp = PLAYER.maxHealth;
+    this.hard = 0;
     this.hud.setCenter('');
     this.fx.magic({ x: p.x, y: p.y + 1, z: p.z }, 20, COLORS.gold, 3);
   }
 
   private showDamageDir(from: { x: number; y: number; z: number }): void {
     const dx = from.x - this.motor.pos.x, dz = from.z - this.motor.pos.z;
-    const ang = Math.atan2(-dx, -dz); // world yaw toward the source
+    const ang = Math.atan2(-dx, -dz);
     this.hud.damageFrom(-(ang - this.yaw));
+  }
+
+  /** Shared parry juice for projectile parries and melee (mid-swing) parries. */
+  private parryFeedback(at: THREE.Vector3 | null, melee: boolean): void {
+    const p = at ?? this.tmpEye.clone().addScaledVector(this.fwd, 2);
+    this.fx.freeze(melee ? 0.16 : 0.13);
+    this.fx.glow(p, 3.5, COLORS.parry, 0.25);
+    this.fx.sparks(p, 30, 14, COLORS.parry, 0.15);
+    this.audio.play('parry', { volume: 1.1 });
+    this.audio.duck(0.2, 0.35);
+    this.fx.shake(0.4);
+    this.flashAmt = 0.45;
+    this.flashColor.set(0xfff4d0);
+    this.style.add(melee ? 'COUNTERPUNCH' : 'PARRY', melee ? 170 : 150, true);
   }
 
   private onLocalKill(v: EnemyView, how: string): void {
     const now = this.time;
     const s = this.style;
     const head = (v as EnemyView & { lastHead?: boolean }).lastHead;
-    s.add(v.def.heavy ? `${v.def.name} SLAIN` : 'KILL', v.def.score, v.def.heavy);
+    s.add(v.def.heavy ? `${v.def.name} SLAIN` : 'KILL', v.def.score, v.def.heavy, this.weapons.current);
     if (head) s.add('HEADSHOT', 35);
     if (!this.motor.grounded) s.add('AIRBORNE', 40);
     if (Math.hypot(this.motor.vel.x, this.motor.vel.z) > 23) s.add('SPEEDKILL', 30);
@@ -362,10 +391,13 @@ export class Game {
     this.lastKillT = now;
     this.weapons.noteKill();
     if (this.weapons.arsenal()) s.add('ARSENAL', 120, true);
-    this.fx.freeze(v.def.heavy ? 0.14 : 0.035);
-    this.audio.synth('kill', 0.5);
+    this.fx.freeze(v.def.heavy ? 0.14 : 0.04);
+    this.audio.play('gore', { volume: 0.55, pitch: 1.2 });
+    this.audio.play('metal_heavy', { volume: 0.35, pitch: 1.6 });
     this.hud.hitmarker(true);
     if (v.def.heavy) this.fx.shake(0.7);
+    // up-close kills paint the lens
+    if (v.centre().distanceTo(this.tmpEye) < 4.5) this.hud.bloodSplat();
   }
 
   private weaponCtx(): WeaponCtx {
@@ -387,15 +419,19 @@ export class Game {
         (v as EnemyView & { lastHead?: boolean }).lastHead = head;
         this.fx.blood(point, Math.min(24, 4 + dmg / 4), dir, 6);
         if (dmg >= 25) this.fx.splatter(point, 1, 4, 0.9);
-        this.audio.play(v.kind === 'drone' || v.kind === 'warden' || v.kind === 'colossus' ? 'metal_light' : 'flesh', { at: point, volume: Math.min(1, 0.4 + dmg / 60) });
-        if (head) this.audio.synth('tick', 0.8);
+        const metal = v.kind === 'drone' || v.kind === 'warden' || v.kind === 'colossus';
+        this.audio.play(metal ? 'metal_light' : 'flesh', { at: point, volume: Math.min(1, 0.4 + dmg / 60) });
+        if (head) this.audio.play('metal_light', { volume: 0.7, pitch: 2.2, variance: 0.02 });
         this.hud.hitmarker(false);
         this.style.trickle(dmg * 0.12);
         link.hit({ e: v.id, d: Math.round(dmg * 10) / 10, k: kind, hs: head || undefined, rc: extra?.rc });
         if (this.enemies.predictDamage(v, dmg, performance.now() / 1000)) this.enemies.kill(v, kind, true);
       },
       explode: (p, r, dmg, kind, force, selfDmg) => this.explode(p, r, dmg, kind, force, selfDmg),
-      parry: (id, dir) => link.parry({ id, dir: [dir.x, dir.y, dir.z] }),
+      parry: (id, dir, at) => {
+        link.parry({ id, dir: [r2(dir.x), r2(dir.y), r2(dir.z)], at: [r2(at.x), r2(at.y), r2(at.z)] });
+        this.parryFeedback(null, false);
+      },
       sendFx: (m) => link.fx(m),
       style: (label, pts, big) => this.style.add(label, pts, big),
     };
@@ -403,9 +439,10 @@ export class Game {
 
   private explode(p: { x: number; y: number; z: number }, r: number, dmg: number, kind: HitKind, force: number, selfDmg: number): void {
     if (!this.link) return;
-    const pv: V = [Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100];
+    const pv: V = [r2(p.x), r2(p.y), r2(p.z)];
     this.link.boom({ p: pv, r, d: dmg, k: kind });
-    this.audio.play(r > 4.5 ? 'explosion' : 'explosion_small', { at: p, volume: 1 });
+    this.audio.play(r > 4.5 ? 'explosion' : 'explosion_small', { at: p, volume: 1, reverb: 0.5 });
+    this.audio.synth('boom', 0.7);
     this.fx.decal(p, { x: 0, y: 1, z: 0 }, r * 0.8, 'scorch');
     const c = { x: this.motor.pos.x, y: this.motor.pos.y + 0.9, z: this.motor.pos.z };
     const d = Math.hypot(c.x - p.x, c.y - p.y, c.z - p.z);
@@ -431,14 +468,18 @@ export class Game {
     const link = this.link!;
     if (this.input.pausePressed() && !this.bot) this.setPaused(!this.paused);
     const soloPaused = this.paused && !link.online;
-    // hitstop slows the world, not the network
+    // hitstop slows the world (and freezes its view), never the network
     let worldDt = dt;
     if (this.fx.hitstop > 0) {
       this.fx.hitstop -= dt;
       worldDt = dt * 0.06;
+      this.viewLag = Math.min(0.4, this.viewLag + dt - worldDt);
+    } else if (this.viewLag > 0) {
+      this.viewLag = Math.max(0, this.viewLag - dt * 0.6); // catch back up at 1.6x
     }
     if (soloPaused) worldDt = 0;
     if (!soloPaused) link.update(dt);
+    const viewNow = now - this.viewLag;
 
     // look
     const mouse = this.input.consumeMouse();
@@ -456,16 +497,16 @@ export class Game {
       this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch));
     }
 
-    // move (fixed 120 Hz substeps for consistent physics)
+    // move: fixed 120 Hz substeps; latched presses are handed to the first substep that runs
     const canMove = this.alive && !this.paused && this.phase !== 'over' && this.phase !== 'victory';
-    const inp: MoveInput = {
+    const base: MoveInput = {
       forward: canMove ? (this.input.isDown('forward') ? 1 : 0) - (this.input.isDown('back') ? 1 : 0) : 0,
       strafe: canMove ? (this.input.isDown('right') ? 1 : 0) - (this.input.isDown('left') ? 1 : 0) : 0,
-      jumpPressed: canMove && this.input.wasPressed('jump'),
+      jumpPressed: false,
       jumpHeld: canMove && this.input.isDown('jump'),
-      dashPressed: canMove && this.input.wasPressed('dash'),
+      dashPressed: false,
       slideHeld: canMove && this.input.isDown('slide'),
-      slidePressed: canMove && this.input.wasPressed('slide'),
+      slidePressed: false,
       yaw: this.yaw,
     };
     if (this.alive && worldDt > 0) {
@@ -474,9 +515,13 @@ export class Game {
       let first = true;
       while (this.acc >= step) {
         this.acc -= step;
-        this.motor.step(first ? inp : { ...inp, jumpPressed: false, dashPressed: false, slidePressed: false }, step);
+        const inp = first && canMove
+          ? { ...base, jumpPressed: this.input.consume('jump'), dashPressed: this.input.consume('dash'), slidePressed: this.input.consume('slide') }
+          : base;
+        this.motor.step(inp, step);
         first = false;
       }
+      this.pushOutOfEnemies();
       this.handleMotorEvents();
     }
 
@@ -490,19 +535,19 @@ export class Game {
     this.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
     this.tmpEye.copy(eye);
 
-    if (!this.paused || link.online) this.weapons.update(worldDt, this.input, this.weaponCtx(), mouse);
+    if (!this.paused || link.online) this.weapons.update(worldDt, dt, this.input, this.weaponCtx(), mouse);
 
-    // remote entities
-    const smp = this.snaps.sample(now, link.interpDelay);
+    // remote entities, rendered slightly in the past
+    const smp = this.snaps.sample(viewNow, this.snaps.delay);
     if (smp) {
-      this.enemies.applySnapshot(smp.a, smp.b, smp.t, now);
+      this.enemies.applySnapshot(smp.a, smp.b, smp.t, now, Math.max(1.5, this.snaps.gap * 3));
       const prevPl = new Map(smp.a.pl.map((p) => [p[0], p]));
       for (const p of smp.b.pl) {
         const r = this.remotes.get(p[0]);
         if (r) r.apply(prevPl.get(p[0]), p, smp.t);
       }
     }
-    const serverNow = this.snaps.serverNow(now);
+    const serverNow = this.snaps.serverNow(viewNow);
     this.hazards.update(worldDt, serverNow, this.probe(), now);
     this.enemies.update(worldDt, now);
     for (const r of this.remotes.values()) {
@@ -515,12 +560,13 @@ export class Game {
 
     // music intensity follows the fight and the style rank
     const combat = this.phase === 'combat' && this.enemies.views.size > 0;
-    this.audio.setIntensity(combat ? 0.55 + this.style.rank * 0.07 : 0.12);
+    this.audio.setIntensity(combat ? 0.84 + this.style.rank * 0.023 : 0.35);
 
     // upload our state
     this.sendAcc += dt;
     if (this.sendAcc >= 1 / PLAYER_SEND_RATE) {
-      this.sendAcc = 0;
+      this.sendAcc -= 1 / PLAYER_SEND_RATE;
+      if (this.sendAcc > 0.1) this.sendAcc = 0;
       const m = this.motor;
       let f = 0;
       if (m.grounded) f |= PF.grounded;
@@ -534,7 +580,6 @@ export class Game {
       });
     }
 
-    // death camera
     if (!this.alive) {
       this.deadT += dt;
       const left = Math.max(0, PLAYER.respawnTime - this.deadT);
@@ -544,15 +589,37 @@ export class Game {
     this.updateCamera(dt);
     this.updatePost(dt);
     this.hud.update(dt, {
-      hp: this.hp, stamina: this.motor.stamina, weapon: this.weapons.current, coins: this.weapons.coins, coreCd: this.weapons.coreCd,
-      style: this.style, wave: this.wave, waves: WAVES.length, title: this.waveTitle, left: this.waveLeft, phase: this.phase,
+      hp: this.hp, hard: this.hard, stamina: this.motor.stamina, weapon: this.weapons.current, coins: this.weapons.coins,
+      coreCd: this.weapons.coreCd, style: this.style, wave: this.wave, waves: WAVES.length,
+      title: WAVES[this.wave - 1]?.title ?? '', left: this.waveLeft, phase: this.phase,
       timer: this.phaseTimer, boss: this.bossInfo(), ping: link.ping, online: link.online,
     });
     const partner = [...this.remotes.values()][0];
-    this.hud.setPartner(partner ? partner.name : null, partner?.hp ?? 0, partner?.alive ?? false);
+    this.hud.setPartner(partner ? partner.name : null, partner?.hp ?? 0, partner?.alive ?? false, partner?.connected ?? true);
     this.audio.setListener(eye, this.yaw);
     this.renderer.render(this.world.scene, this.camera, this.alive ? this.weapons.vmScene : null, this.weapons.vmCam);
     this.input.endFrame();
+  }
+
+  /** Enemies are solid: no running through husks or standing inside the colossus. */
+  private pushOutOfEnemies(): void {
+    const m = this.motor;
+    for (const v of this.enemies.views.values()) {
+      if (v.dead || v.spawnT > 0.5) continue;
+      const def = v.def;
+      const baseY = def.flying ? v.pos.y - def.radius : v.pos.y;
+      const topY = def.flying ? v.pos.y + def.radius : v.pos.y + def.height;
+      if (m.pos.y > topY - 0.05 || m.pos.y + m.height < baseY) continue;
+      const dx = m.pos.x - v.pos.x, dz = m.pos.z - v.pos.z;
+      const min = def.radius * (def.flying ? 0.9 : 0.85) + PLAYER.halfWidth;
+      const d = Math.hypot(dx, dz);
+      if (d >= min) continue;
+      const nx = d > 1e-4 ? dx / d : 1, nz = d > 1e-4 ? dz / d : 0;
+      m.pos.x = v.pos.x + nx * min;
+      m.pos.z = v.pos.z + nz * min;
+      const into = m.vel.x * nx + m.vel.z * nz;
+      if (into < 0) { m.vel.x -= nx * into; m.vel.z -= nz * into; }
+    }
   }
 
   private bossInfo(): { hp: number; max: number } | null {
@@ -607,7 +674,7 @@ export class Game {
         }
         case 'pad':
           this.audio.play('thruster', { volume: 0.8 });
-          this.fx.sparks({ x: m.pos.x, y: m.pos.y + 0.2, z: m.pos.z }, 16, 6, COLORS.gold);
+          this.fx.sparks({ x: m.pos.x, y: m.pos.y + 0.2, z: m.pos.z }, 16, 6, COLORS.blue);
           break;
         case 'lava':
           this.link?.hurt({ src: 'lava', d: PLAYER.lavaDps * 0.25 });
@@ -628,7 +695,7 @@ export class Game {
     this.eyeH += (wantEye - this.eyeH) * Math.min(1, dt * (this.alive ? 14 : 3));
     this.landDip = Math.max(0, this.landDip - dt * 1.6);
     const strafe = (this.input.isDown('right') ? 1 : 0) - (this.input.isDown('left') ? 1 : 0);
-    const wantRoll = !this.alive ? 0.5 : (-strafe * 0.018) + (m.sliding ? 0.05 : 0);
+    const wantRoll = !this.alive ? 0.5 : -strafe * 0.018 + (m.sliding ? 0.05 : 0);
     this.roll += (wantRoll - this.roll) * Math.min(1, dt * 8);
     this.fovKick = Math.max(0, this.fovKick - dt * 4);
     const speed = Math.hypot(m.vel.x, m.vel.z);
@@ -650,7 +717,6 @@ export class Game {
     const p = this.renderer.post;
     p.hurt = this.hurtFlash;
     p.lowHp = this.alive && this.hp <= 30 ? 1 - this.hp / 30 : 0;
-    if (this.fx.hitstop > 0.08) { this.flashAmt = 0.35; this.flashColor.set(0xfff4d0); }
     p.flash.copy(this.flashColor);
     p.flashAmount = this.flashAmt;
     p.saturation = this.alive ? 1.0 : 0.2;
@@ -676,10 +742,10 @@ export class Game {
   /** Debug/test hook exposed on window for automated captures. */
   debugState(): Record<string, unknown> {
     return {
-      mode: this.mode, phase: this.phase, wave: this.wave, left: this.waveLeft, hp: this.hp, alive: this.alive,
+      mode: this.mode, phase: this.phase, wave: this.wave, left: this.waveLeft, hp: this.hp, hard: this.hard, alive: this.alive,
       pos: { ...this.motor.pos }, enemies: this.enemies.views.size, projectiles: this.hazards.projectiles.size,
       style: Math.round(this.style.total), rank: this.style.rank, weapon: this.weapons.current, fps: Math.round(this.fps),
-      remotes: this.remotes.size, shots: this.weapons.shotsFired,
+      remotes: this.remotes.size, shots: this.weapons.shotsFired, interp: Math.round(this.snaps.delay * 1000),
     };
   }
 }
@@ -687,3 +753,4 @@ export class Game {
 function r2(n: number): number {
   return Math.round(n * 100) / 100;
 }
+

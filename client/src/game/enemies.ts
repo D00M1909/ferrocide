@@ -14,38 +14,52 @@ interface Skin {
   sat: number;
   bright: number;
   emissive?: number;
+  rim: number;
+  eyes: number; // glowing eye colour
+  eyeSize: number;
+  horns: number; // number of horn spikes (0 = none)
+  bulk?: number; // non-uniform scale: widen the body
+  metal?: boolean; // gib palette
   anims: Partial<Record<EnemyState | 'death' | 'idle' | 'leap' | 'hit', string[]>>;
   attackAnims?: Record<string, string[]>;
 }
 
+// Palette rule: the world is cold grey metal; enemies are bone/iron with hot red eyes
+// and a red rim; saturated red is reserved for blood, yellow only for parryable shots.
 const SKINS: Record<EnemyKind, Skin> = {
   husk: {
-    model: 'enemy_large', hue: -2.25, sat: 0.75, bright: 1.0, emissive: 0x100000,
+    model: 'enemy_large', hue: -2.25, sat: 0.12, bright: 1.2, rim: 0xff3020, eyes: 0xff2010, eyeSize: 0.22, horns: 2, bulk: 0.9,
     anims: { move: ['Run'], idle: ['Idle'], windup: ['Punch'], recover: ['Idle'], stun: ['HitReact'], death: ['Death'], leap: ['Jump'], spawn: ['Idle'], hit: ['HitReact'] },
   },
   eye: {
-    model: 'enemy_small', hue: -2.3, sat: 1.1, bright: 1.0, emissive: 0x180000,
+    model: 'enemy_small', hue: -2.3, sat: 0.35, bright: 1.05, emissive: 0x100000, rim: 0xff4020, eyes: 0xff3010, eyeSize: 0.3, horns: 3,
     anims: { move: ['Fast_Flying'], idle: ['Flying_Idle'], windup: ['Headbutt'], dive: ['Fast_Flying'], death: ['Death'], spawn: ['Flying_Idle'], stun: ['HitReact'] },
   },
   warden: {
-    model: 'mech', hue: -2.05, sat: 0.55, bright: 0.8,
+    model: 'mech', hue: -2.05, sat: 0.14, bright: 0.8, rim: 0xff5a20, eyes: 0xff2a10, eyeSize: 0.35, horns: 0, metal: true,
     anims: { move: ['Walk'], idle: ['Idle'], windup: ['Shoot_Small'], recover: ['Idle'], stun: ['HitRecieve_1'], death: ['Death'], spawn: ['Idle'] },
   },
   drone: {
-    model: 'robot_flying', hue: 0.3, sat: 0.35, bright: 0.85, emissive: 0x140000,
+    model: 'robot_flying', hue: 0.3, sat: 0.1, bright: 0.95, rim: 0xff5a20, eyes: 0xff2010, eyeSize: 0.4, horns: 0, metal: true,
     anims: { move: ['Run'], idle: ['Idle'], windup: ['Shoot'], attack: ['Shoot'], death: ['Dead'], spawn: ['Idle'], stun: ['Idle'] },
   },
   brute: {
-    model: 'enemy_large', hue: -2.0, sat: 1.15, bright: 0.55, emissive: 0x220000,
+    model: 'enemy_large', hue: -2.0, sat: 0.3, bright: 0.55, emissive: 0x140202, rim: 0xff4a10, eyes: 0xff7a10, eyeSize: 0.45, horns: 4, bulk: 1.3,
     anims: { move: ['Walk'], idle: ['Idle'], recover: ['Idle'], death: ['Death'], spawn: ['Idle'], stun: ['HitReact'] },
     attackAnims: { smash: ['Punch'], stomp: ['Jump'], mortar: ['Weapon', 'Wave'] },
   },
   colossus: {
-    model: 'mech', hue: -2.4, sat: 1.0, bright: 0.5, emissive: 0x250200,
+    model: 'mech', hue: -2.4, sat: 0.3, bright: 0.45, emissive: 0x2a0600, rim: 0xff6a10, eyes: 0xff8a10, eyeSize: 1.1, horns: 6, metal: true, bulk: 1.15,
     anims: { move: ['Walk'], idle: ['Idle'], recover: ['Idle'], beam: ['Shoot_Big'], death: ['Death'], spawn: ['Hello', 'Idle'] },
-    attackAnims: { smash: ['Kick'], stomp: ['Jump_NoHeight', 'Jump'], mortar: ['Shoot_Big'], beam: ['Shoot_Big'], summon: ['Pickup', 'Yes'] },
+    attackAnims: { smash: ['Kick'], stomp: ['Jump_NoHeight', 'Jump'], mortar: ['Shoot_Big'], beam: ['Shoot_Big'], summon: ['Pickup', 'Yes'], ring: ['Shoot_Big'] },
   },
 };
+
+/** Vocal pitch per creature (metal enemies don't growl). */
+const VOICE: Record<EnemyKind, number> = { husk: 1, eye: 1.8, warden: 1, drone: 1, brute: 0.55, colossus: 0.4 };
+
+const hornGeo = new THREE.ConeGeometry(0.5, 1, 4);
+const hornMat = new THREE.MeshLambertMaterial({ color: 0x1a1614, emissive: 0x120200 });
 
 const PARRYABLE_ATTACKS = new Set(['orb', 'mortar']);
 
@@ -65,16 +79,24 @@ export class EnemyView {
   telegraphT = 0;
   telegraphDur = 0;
   telegraphColor = new THREE.Color();
+  meleeTelegraph = false;
   anim: THREE.AnimationAction | null = null;
   lockAnim = 0;
   spawnT = 0;
   lastSeen = 0;
   glow: THREE.Sprite;
+  eyes: THREE.Sprite;
+  headBone: THREE.Object3D | null = null;
+  headWorld = new THREE.Vector3();
+  headValid = false;
+  horns = new THREE.Group();
+  readonly skin: Skin;
   readonly def;
 
   constructor(public id: number, public kind: EnemyKind, scene: THREE.Scene, glowTex: THREE.Texture) {
     this.def = ENEMIES[kind];
     const skin = SKINS[kind];
+    this.skin = skin;
     this.inst = instance(skin.model, {
       height: kind === 'eye' ? 1.0 : kind === 'drone' ? 1.2 : this.def.height,
       center: this.def.flying,
@@ -83,8 +105,29 @@ export class EnemyView {
       bright: skin.bright,
       emissive: skin.emissive ? new THREE.Color(skin.emissive) : undefined,
       flashColor: new THREE.Color(1, 1, 1),
-      rim: new THREE.Color(kind === 'drone' || kind === 'warden' || kind === 'colossus' ? 0xff7a30 : 0xff4030).multiplyScalar(0.9),
+      rim: new THREE.Color(skin.rim).multiplyScalar(0.8),
     });
+    if (skin.bulk) {
+      this.inst.inner.scale.x *= skin.bulk;
+      this.inst.inner.scale.z *= skin.bulk;
+    }
+    this.inst.inner.traverse((o) => { if (!this.headBone && /^head$/i.test(o.name)) this.headBone = o; });
+    // hot glowing eyes (tracked to the head bone every frame)
+    this.eyes = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: skin.eyes, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+    this.eyes.scale.set(skin.eyeSize * 2.2, skin.eyeSize, 1);
+    scene.add(this.eyes);
+    // horn spikes on the skull
+    for (let i = 0; i < skin.horns; i++) {
+      const h = new THREE.Mesh(hornGeo, hornMat);
+      const side = i % 2 === 0 ? 1 : -1;
+      const row = Math.floor(i / 2);
+      const sz = this.def.height * (this.def.flying ? 0.28 : 0.1);
+      h.scale.set(sz * 0.35, sz * (1.4 - row * 0.25), sz * 0.35);
+      h.position.set(side * sz * (0.45 + row * 0.25), sz * 0.35, sz * (0.1 + row * 0.35));
+      h.rotation.set(-0.35 - row * 0.3, 0, -side * 0.45);
+      this.horns.add(h);
+    }
+    scene.add(this.horns);
     this.hp = this.def.hp;
     scene.add(this.inst.root);
     this.glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xffffff, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0, fog: false }));
@@ -105,7 +148,9 @@ export class EnemyView {
     return out.set(this.pos.x, this.pos.y + (this.def.flying ? 0 : this.def.height * 0.5), this.pos.z);
   }
 
+  /** Head position: the animated head bone when available, so headshots match the visuals. */
   headPos(out = new THREE.Vector3()): THREE.Vector3 {
+    if (this.headValid && !this.def.flying) return out.copy(this.headWorld);
     return out.set(this.pos.x, this.pos.y + (this.def.flying ? 0 : this.def.headY), this.pos.z);
   }
 
@@ -119,6 +164,9 @@ export class EnemyView {
 
   dispose(scene: THREE.Scene): void {
     scene.remove(this.inst.root);
+    scene.remove(this.eyes);
+    scene.remove(this.horns);
+    (this.eyes.material as THREE.Material).dispose();
     this.inst.mixer?.stopAllAction();
   }
 }
@@ -151,7 +199,7 @@ export class Enemies {
     return v;
   }
 
-  applySnapshot(a: Snapshot, b: Snapshot, t: number, now: number): void {
+  applySnapshot(a: Snapshot, b: Snapshot, t: number, now: number, staleAfter = 1.5): void {
     const prev = new Map<number, EnemySnap>();
     for (const e of a.e) prev.set(e[0], e);
     for (const e of b.e) {
@@ -174,7 +222,7 @@ export class Enemies {
     }
     // enemies gone from the latest snapshot without a kill event (reset, kamikaze cleanup)
     for (const v of this.views.values()) {
-      if (!v.dead && now - v.lastSeen > 0.6) {
+      if (!v.dead && now - v.lastSeen > staleAfter) {
         v.dispose(this.scene);
         this.views.delete(v.id);
       }
@@ -207,6 +255,7 @@ export class Enemies {
         this.fx.flashLight(c, 0xff2010, big ? 10 : 5, big ? 30 : 14, 0.6);
         this.fx.tracer({ x: c.x, y: c.y + 40, z: c.z }, { x: c.x, y: v.pos.y, z: c.z }, 0xff3020, big ? 0.9 : 0.35, 0.5);
         this.audio.play('spawn', { at: c, volume: big ? 1.2 : 0.7, pitch: big ? 0.6 : 1 });
+        if (!SKINS[e.k].metal) this.audio.growl(c, VOICE[e.k], big ? 1.1 : 0.5, big ? 0.9 : 0.4);
         if (big) this.fx.shake(0.4);
         break;
       }
@@ -231,6 +280,7 @@ export class Enemies {
         if (!v || v.dead) break;
         const parry = PARRYABLE_ATTACKS.has(e.a);
         v.telegraphT = v.telegraphDur = e.dur;
+        v.meleeTelegraph = e.a === 'swipe' || e.a === 'smash';
         v.telegraphColor.set(parry ? 0xfff2a0 : e.a === 'beam' ? 0xff2020 : 0xff6a20);
         if (e.a === 'leap') v.play('leap', '', true);
         else {
@@ -244,6 +294,19 @@ export class Enemies {
         else if (e.a === 'stomp') this.audio.play('metal_heavy', { at: head, volume: 0.8, pitch: 0.6 });
         else if (e.a === 'burst') this.audio.play('laser_retro', { at: head, volume: 0.5, pitch: 1.6 });
         else this.audio.play('whoosh', { at: head, volume: 0.5, pitch: 0.7 });
+        if (!v.skin.metal && (e.a === 'swipe' || e.a === 'smash' || e.a === 'dive' || e.a === 'stomp' || e.a === 'leap')) this.audio.growl(head, VOICE[v.kind] * 1.1, 0.35, 0.45);
+        break;
+      }
+      case 'mparry': {
+        const v = this.views.get(e.id);
+        if (!v) break;
+        v.telegraphT = 0;
+        v.lockAnim = 0;
+        v.play('stun', '', true);
+        const h = v.headPos();
+        this.fx.sparks(h, 40, 12, COLORS.parry, 0.14);
+        this.fx.glow(h, 3, COLORS.parry, 0.2);
+        this.fx.blood(h, 20, null, 8);
         break;
       }
       case 'stun': {
@@ -273,6 +336,8 @@ export class Enemies {
     v.dead = true;
     v.deadT = 0;
     v.telegraphT = 0;
+    v.eyes.visible = false;
+    v.horns.visible = false;
     const c = v.centre();
     const heavy = v.def.heavy;
     const gib = how === 'explosion' || how === 'rocket' || how === 'core' || how === 'parry' || how === 'slam' || v.kind === 'eye' || (how === 'shotgun' && Math.random() < 0.6);
@@ -280,6 +345,7 @@ export class Enemies {
     this.fx.bloodMist(c, heavy ? 14 : 6, heavy ? 2.5 : 1);
     this.fx.splatter(c, heavy ? 16 : 6, heavy ? 8 : 4, heavy ? 3 : 1.4);
     this.audio.play('gore', { at: c, volume: heavy ? 1.3 : 0.9, pitch: heavy ? 0.7 : 1 });
+    if (!v.skin.metal) this.audio.growl(c, VOICE[v.kind] * 1.5, heavy ? 0.9 : 0.3, heavy ? 0.8 : 0.35);
     if (v.kind === 'drone' || v.kind === 'warden' || v.kind === 'colossus') {
       this.fx.explosion(c, heavy ? 6 : 2.2);
       this.fx.sparks(c, 30, 12);
@@ -287,8 +353,10 @@ export class Enemies {
     }
     if (gib || heavy) {
       v.gibbed = true;
-      this.fx.gibBurst(c, heavy ? 40 : 14, heavy ? 16 : 10, heavy ? 0.5 : 0.22);
+      this.fx.gibBurst(c, heavy ? 40 : 16, heavy ? 16 : 10, heavy ? 0.5 : 0.24, v.skin.metal ? 'metal' : 'flesh');
       v.inst.root.visible = false;
+      v.eyes.visible = false;
+      v.horns.visible = false;
     } else {
       v.play('death', '', true, 1.3);
     }
@@ -324,6 +392,20 @@ export class Enemies {
       v.inst.root.position.copy(v.pos);
       if (v.def.flying) v.inst.root.position.y += Math.sin(now * 3 + v.id) * 0.08;
       v.inst.root.rotation.y = v.yaw + Math.PI;
+      // track eyes + horns to the animated head
+      if (v.headBone) {
+        v.inst.root.updateMatrixWorld(true);
+        v.headBone.getWorldPosition(v.headWorld);
+        v.headValid = true;
+      } else {
+        v.headWorld.set(v.pos.x, v.pos.y + (v.def.flying ? 0 : v.def.headY), v.pos.z);
+      }
+      const hfx = -Math.sin(v.yaw), hfz = -Math.cos(v.yaw);
+      const hs = v.def.flying ? v.def.radius : v.def.headR;
+      v.eyes.position.set(v.headWorld.x + hfx * hs * 0.9, v.headWorld.y + hs * 0.15, v.headWorld.z + hfz * hs * 0.9);
+      (v.eyes.material as THREE.SpriteMaterial).opacity = 0.75 + Math.sin(now * 9 + v.id) * 0.25;
+      v.horns.position.copy(v.headWorld);
+      v.horns.rotation.y = v.yaw;
       // spawn scale-in
       if (v.spawnT > 0) {
         v.spawnT = Math.max(0, v.spawnT - dt * 1.4);
@@ -339,6 +421,8 @@ export class Enemies {
         const k = 1 - v.telegraphT / Math.max(0.01, v.telegraphDur);
         mat.opacity = 0.35 + k * 0.65 + Math.sin(now * 40) * 0.1;
         mat.color.copy(v.telegraphColor);
+        // melee swings flash parry-yellow in the window where a punch counters them
+        if (v.meleeTelegraph && v.telegraphT < 0.32) mat.color.setHex(0xfff2a0);
         v.glow.scale.setScalar((v.def.heavy ? 3 : 1.6) * (0.6 + k * 0.8));
         if (k > 0.75) flash = Math.max(flash, 0.35 * ((k - 0.75) * 4));
       } else mat.opacity = Math.max(0, mat.opacity - dt * 6);

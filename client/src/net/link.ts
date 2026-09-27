@@ -10,6 +10,8 @@ export interface NetHandlers {
   events: (e: GameEvent[]) => void;
   host: (isHost: boolean) => void;
   disconnect: (reason: string) => void;
+  drop: () => void; // connection lost, SDK is trying to reconnect
+  reconnect: () => void;
 }
 
 export interface NetLink {
@@ -127,9 +129,13 @@ export class ColyseusLink implements NetLink {
     room.onMessage('pong', (t: number) => {
       const rtt = performance.now() - t;
       link.ping = link.ping ? link.ping * 0.8 + rtt * 0.2 : rtt;
-      link.interpDelay = Math.min(0.25, 2 / SNAPSHOT_RATE + link.ping / 2000 + 0.02);
+      link.interpDelay = Math.min(0.25, 2 / SNAPSHOT_RATE + 0.02);
     });
-    room.onLeave(() => link.handlers.disconnect?.('Connection to the server was lost.'));
+    room.onDrop(() => link.handlers.drop?.());
+    room.onReconnect(() => link.handlers.reconnect?.());
+    room.onLeave((code) => {
+      if (code !== 1000 && code !== 4000) link.handlers.disconnect?.('Connection to the server was lost.');
+    });
     link.pingTimer = setInterval(() => room.send('ping', performance.now()), 1000);
     return { link, welcome };
   }

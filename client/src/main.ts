@@ -52,7 +52,7 @@ function esc(s: string): string {
 // ------------------------------------------------------------------ boot
 
 async function boot(): Promise<void> {
-  const loading = h(`<div class="title">${GAME_NAME}</div><div class="loading" id="lp">LOADING 0%</div>`);
+  const loading = h(`<div class="logo">${GAME_NAME}</div><div class="loading" id="lp">LOADING 0%</div>`);
   show(loading);
   let a = 0, b = 0;
   const upd = () => {
@@ -69,6 +69,23 @@ async function boot(): Promise<void> {
   game.onPause = (p) => (p ? showPause() : hidePause());
   game.onDisconnect = (r) => { game.end(); mainMenu(r); };
   game.onPhase = (p) => onPhase(p);
+  // a retry (from either player) closes everyone's results screen
+  game.onReset = () => {
+    if (screen?.classList.contains('results-screen')) { show(null); gate(); }
+  };
+  let toast: HTMLElement | null = null;
+  game.onConnection = (ok) => {
+    toast?.remove();
+    toast = null;
+    if (!ok) {
+      toast = h('CONNECTION LOST — RECONNECTING…', 'toast');
+      ui.appendChild(toast);
+    }
+  };
+  // don't let a stray Ctrl+W / refresh end a run without asking
+  window.addEventListener('beforeunload', (e) => {
+    if (game.mode === 'play' && !botMode) e.preventDefault();
+  });
   game.startLoop();
   document.addEventListener('pointerlockchange', () => {
     if (!game || game.mode !== 'play' || botMode) return;
@@ -92,20 +109,28 @@ async function boot(): Promise<void> {
 function mainMenu(error = ''): void {
   void audio.playMusic('menu');
   const el = h(`
-    <div class="title">${GAME_NAME}</div>
-    <div class="subtitle">BLOOD IS FUEL · CO-OP ARENA</div>
-    <div class="menu">
-      <label class="small">CALLSIGN</label>
-      <input type="text" id="name" maxlength="14" placeholder="SLAYER" value="${esc(settings.name)}" />
-      <button class="primary" id="solo">▶ PLAY SOLO</button>
-      <button id="host">⚑ HOST CO-OP</button>
-      <div class="row"><input type="text" id="code" maxlength="4" placeholder="CODE" style="width:120px" /><button id="join" style="flex:1">⇥ JOIN CO-OP</button></div>
-      <button id="settings">⚙ SETTINGS</button>
-      <button id="controls">⌨ CONTROLS</button>
-      <div class="err" id="err">${esc(error)}</div>
+    <div class="menu-left">
+      <div class="logo">${GAME_NAME}</div>
+      <div class="tagline">BLOOD IS <b>FUEL</b> · 2P CO-OP</div>
+      <div class="menu">
+        <div class="section-label">CALLSIGN</div>
+        <input type="text" id="name" maxlength="14" placeholder="SLAYER" value="${esc(settings.name)}" />
+        <div class="section-label">DEPLOY</div>
+        <button class="primary" id="solo">PLAY SOLO</button>
+        <button id="host">HOST CO-OP</button>
+        <div class="row"><input type="text" id="code" maxlength="4" placeholder="CODE" style="width:118px" /><button id="join" style="flex:1">JOIN CO-OP</button></div>
+        <div class="section-label">SYSTEM</div>
+        <div class="row"><button id="settings" style="flex:1">SETTINGS</button><button id="controls" style="flex:1">CONTROLS</button></div>
+        <div class="err" id="err">${esc(error)}</div>
+      </div>
     </div>
-    <div class="hint">Heal by spilling blood up close · Parry glowing yellow shots with F · Shoot your own coins mid-air</div>
-  `);
+    <div class="menu-right">
+      <h3>FIELD NOTES</h3>
+      Blood is fuel: damage dealt up close <b>heals</b> you — but part of every hit stays as hard damage for a moment.<br>
+      <b>Yellow</b> means parryable: punch orbs, bolts and mortars back with F, or punch a husk mid-swing.<br>
+      Toss a coin, then shoot it. Shoot your own shotgun core. Switch weapons — stale kills are worth less.
+    </div>
+  `, 'menu-layout');
   show(el);
   const name = el.querySelector<HTMLInputElement>('#name')!;
   name.addEventListener('input', () => { settings.name = name.value.toUpperCase(); saveSettings(settings); });
@@ -139,7 +164,7 @@ function controlsScreen(back: () => void): void {
         <div><b>SLAGTHROWER</b> rockets</div><div>RMB detonates rockets mid-air · rocket jump!</div>
         <div><b>PARRY</b> punch yellow orbs/mortars</div><div>reflects them, heals ${50} HP</div>
       </div>
-      <div style="margin-top:18px"><button id="back">◀ BACK</button></div>
+      <div style="margin-top:18px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
   el.querySelector('#back')!.addEventListener('click', () => { blip(); back(); });
@@ -161,7 +186,7 @@ function settingsScreen(back: () => void): void {
       </select><span></span></div>
       <div class="setting"><span>DITHERING</span><input type="checkbox" id="dither" ${s.dither ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>INVERT Y</span><input type="checkbox" id="inv" ${s.invertY ? 'checked' : ''}><span></span></div>
-      <div style="margin-top:14px"><button id="back">◀ BACK</button></div>
+      <div style="margin-top:14px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
   const apply = () => {
@@ -228,8 +253,8 @@ function lobby(link: NetLink): void {
       <div class="code">${esc(link.code)}</div>
       <div class="hint" id="players"></div>
       <div style="display:flex;gap:8px;justify-content:center;margin-top:14px">
-        <button id="start" class="primary">▶ START</button>
-        <button id="leave">✕ LEAVE</button>
+        <button id="start" class="primary">START</button>
+        <button id="leave">LEAVE</button>
       </div>
       <div class="hint" id="wait"></div>
     </div>`);
@@ -267,7 +292,11 @@ function gate(): void {
   clickGate.style.background = 'rgba(0,0,0,0.35)';
   clickGate.addEventListener('click', () => {
     audio.resume();
-    input.requestLock();
+    // fullscreen lets the keyboard lock swallow Ctrl+W while sliding
+    const root = document.documentElement;
+    if (!document.fullscreenElement && root.requestFullscreen) {
+      root.requestFullscreen({ navigationUI: 'hide' }).catch(() => undefined).finally(() => input.requestLock());
+    } else input.requestLock();
   });
   ui.appendChild(clickGate);
 }
@@ -277,12 +306,12 @@ let pauseEl: HTMLElement | null = null;
 function showPause(): void {
   if (pauseEl || screen) return;
   pauseEl = h(`
-    <div class="title" style="font-size:64px">PAUSED</div>
+    <div class="logo" style="font-size:56px">PAUSED</div>
     <div class="menu">
-      <button class="primary" id="resume">▶ RESUME</button>
-      <button id="settings">⚙ SETTINGS</button>
-      <button id="controls">⌨ CONTROLS</button>
-      <button id="quit">✕ QUIT TO MENU</button>
+      <button class="primary" id="resume">RESUME</button>
+      <button id="settings">SETTINGS</button>
+      <button id="controls">CONTROLS</button>
+      <button id="quit">QUIT TO MENU</button>
     </div>
     <div class="hint">${game.link?.online ? `CO-OP ROOM ${esc(game.link.code)} — the fight goes on while you're paused!` : 'Solo — the world is frozen.'}</div>`);
   ui.appendChild(pauseEl);
@@ -316,14 +345,16 @@ function showResults(info: GameOverInfo): void {
   const el = h(`
     <div class="panel results">
       <h2>${info.win ? 'THE FOUNDRY FALLS SILENT' : `SLAIN ON WAVE ${info.wave}/${WAVES.length}`}</h2>
-      <div class="final-rank" style="color:${grade.color}">${grade.letter}</div>
+      <div class="hint" style="margin:0 auto">FINAL RANK · ${grade.letter}</div>
+      <div class="final-rank" style="color:${grade.color}">${grade.name}</div>
       <div class="hint" style="margin:0 auto">TIME ${mins}:${String(secs).padStart(2, '0')}</div>
       <table><tr><th>SLAYER</th><th>KILLS</th><th>DAMAGE</th><th>STYLE</th><th>PARRIES</th><th>DEATHS</th></tr>${rows}</table>
       <div style="display:flex;gap:8px">
-        ${info.win ? '' : `<button class="primary" id="retry">↻ RETRY WAVE ${info.wave}</button>`}
-        <button id="menu">✕ MAIN MENU</button>
+        ${info.win ? '' : `<button class="primary" id="retry">RETRY WAVE ${info.wave}</button>`}
+        <button id="menu">MAIN MENU</button>
       </div>
     </div>`);
+  el.classList.add('results-screen');
   show(el);
   el.querySelector('#retry')?.addEventListener('click', () => {
     blip();

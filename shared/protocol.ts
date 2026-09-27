@@ -43,6 +43,7 @@ export interface BoomMsg {
 export interface ParryMsg {
   id: number;
   dir: V;
+  at?: V; // what the parrying player was aiming at (server aims from the projectile's own position)
 }
 
 export type HurtSource = 'proj' | 'melee' | 'shock' | 'beam' | 'boom' | 'lava' | 'self';
@@ -71,8 +72,8 @@ export type FxMsg =
 export type EnemySnap = [number, number, number, number, number, number, number, number];
 /** [id, kind index, x, y, z, vx, vy, vz, reflected?1:0] */
 export type ProjSnap = [number, number, number, number, number, number, number, number, number];
-/** [id, x, y, z, vx, vy, vz, yaw, pitch, flags, weapon, hp, alive] */
-export type PlayerSnap = [string, number, number, number, number, number, number, number, number, number, number, number, number];
+/** [id, x, y, z, vx, vy, vz, yaw, pitch, flags, weapon, hp, alive, hardDamage, connected] */
+export type PlayerSnap = [string, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
 
 export interface Snapshot {
   t: number;
@@ -107,8 +108,8 @@ export type GameEvent =
   | { t: 'spawn'; id: number; k: EnemyKind; p: V }
   | { t: 'dmg'; id: number; d: number; by: string; hs: boolean; k: string; p: V }
   | { t: 'kill'; id: number; k: EnemyKind; by: string; how: string; p: V; hs: boolean }
-  | { t: 'phurt'; pid: string; d: number; hp: number; src: HurtSource }
-  | { t: 'heal'; pid: string; hp: number; amt: number }
+  | { t: 'phurt'; pid: string; d: number; hp: number; hard: number; src: HurtSource }
+  | { t: 'heal'; pid: string; hp: number; amt: number; hard: number }
   | { t: 'pdie'; pid: string }
   | { t: 'prespawn'; pid: string; p: V }
   | { t: 'wave'; n: number; total: number; title: string; boss: boolean }
@@ -120,6 +121,7 @@ export type GameEvent =
   | { t: 'boom'; p: V; r: number; d: number; hostile: boolean; aid: number; k: string; by?: string }
   | { t: 'parried'; id: number; by: string }
   | { t: 'stun'; id: number; by: string }
+  | { t: 'mparry'; id: number; by: string } // punched an enemy mid-swing
   | { t: 'enrage'; id: number }
   | { t: 'fx'; from: string; fx: FxMsg }
   | { t: 'over'; win: boolean; wave: number; time: number; stats: PlayerStats[] }

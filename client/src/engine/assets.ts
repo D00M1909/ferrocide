@@ -179,6 +179,8 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
     mesh.material = psxify(m, { ...psx, snap: false });
   });
   inner.updateMatrixWorld(true);
+  inner.quaternion.premultiply(gunOrientation(inner));
+  inner.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(inner);
   const size = box.getSize(new THREE.Vector3());
   const longest = Math.max(size.x, size.y, size.z);
@@ -188,4 +190,47 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
   inner.position.sub(c);
   holder.add(inner);
   return holder;
+}
+
+/**
+ * Works out how to rotate an arbitrary gun model so the barrel points down -Z and
+ * the grip hangs toward -Y: the longest axis is the barrel line, its thinner end is
+ * the muzzle, and the mass below the bore line is the grip/stock.
+ */
+function gunOrientation(obj: THREE.Object3D): THREE.Quaternion {
+  const pts: THREE.Vector3[] = [];
+  const v = new THREE.Vector3();
+  obj.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const pos = m.geometry.attributes.position as THREE.BufferAttribute;
+    const step = Math.max(1, Math.floor(pos.count / 1500));
+    for (let i = 0; i < pos.count; i += step) pts.push(v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld).clone());
+  });
+  if (pts.length < 4) return new THREE.Quaternion();
+  const box = new THREE.Box3().setFromPoints(pts);
+  const size = box.getSize(new THREE.Vector3());
+  const centre = box.getCenter(new THREE.Vector3());
+  const axes = ['x', 'y', 'z'] as const;
+  const order = [...axes].sort((a, b) => size[b] - size[a]);
+  const long = order[0];
+  // cross-section area of each end slice: the muzzle is the thinner end
+  const slice = (sign: number) => {
+    const lim = centre[long] + sign * size[long] * 0.35;
+    const sel = pts.filter((p) => (sign > 0 ? p[long] > lim : p[long] < lim));
+    if (!sel.length) return Infinity;
+    const b = new THREE.Box3().setFromPoints(sel).getSize(new THREE.Vector3());
+    return axes.filter((a) => a !== long).reduce((acc, a) => acc * Math.max(b[a], 1e-4), 1);
+  };
+  const muzzleSign = slice(1) < slice(-1) ? 1 : -1;
+  // "up" is the larger of the remaining axes; the side with the centroid is the grip (down)
+  const upAxis = order[1];
+  const mean = pts.reduce((acc, p) => acc + p[upAxis], 0) / pts.length;
+  const downSign = mean < centre[upAxis] ? -1 : 1;
+  const fwd = new THREE.Vector3(); fwd[long] = muzzleSign;
+  const down = new THREE.Vector3(); down[upAxis] = downSign;
+  // basis mapping: fwd -> -Z, down -> -Y
+  const from = new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(down.clone().negate(), fwd.clone().negate()), down.clone().negate(), fwd.clone().negate());
+  const q = new THREE.Quaternion().setFromRotationMatrix(from).invert();
+  return q;
 }

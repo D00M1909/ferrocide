@@ -31,6 +31,7 @@ export class RemotePlayer {
   flags = 0;
   hp = 100;
   alive = true;
+  connected = true;
   private anim: THREE.AnimationAction | null = null;
   private mode = '';
   private tag: THREE.Sprite;
@@ -57,11 +58,12 @@ export class RemotePlayer {
     this.flags = b[9];
     this.hp = b[11];
     this.alive = b[12] === 1;
+    this.connected = b[14] !== 0;
   }
 
   update(dt: number, speed: number): void {
     const r = this.inst.root;
-    r.visible = this.alive;
+    r.visible = this.alive && this.connected;
     r.position.copy(this.pos);
     r.rotation.y = this.yaw + Math.PI;
     this.inst.mixer?.update(dt);

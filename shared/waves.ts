@@ -18,7 +18,8 @@ export const WAVES: WaveDef[] = [
     title: 'FIRST BLOOD',
     groups: [
       { kind: 'husk', count: 4, delay: 0.5, where: 'ground' },
-      { kind: 'husk', count: 4, delay: 6, where: 'ground' },
+      { kind: 'eye', count: 3, delay: 4, where: 'air' },
+      { kind: 'husk', count: 4, delay: 7, where: 'ground' },
     ],
   },
   {

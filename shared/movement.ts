@@ -199,7 +199,12 @@ export class Motor {
       }
       if (hasWish) this.accelerate(wx, wz, P.walkSpeed, P.groundAccel, dt);
     } else if (hasWish) {
+      const before = Math.hypot(this.vel.x, this.vel.z);
       this.accelerate(wx, wz, P.airMaxSpeed, P.airAccel, dt);
+      // air strafing can redirect momentum but not farm unlimited speed
+      const after = Math.hypot(this.vel.x, this.vel.z);
+      const cap = Math.max(before, P.airSpeedCap);
+      if (after > cap) { this.vel.x *= cap / after; this.vel.z *= cap / after; }
     }
 
     // ---- gravity + wall slide

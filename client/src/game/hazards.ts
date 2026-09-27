@@ -49,6 +49,9 @@ export class Hazards {
   private coreGeo = new THREE.IcosahedronGeometry(1, 0);
   private ringGeo = new THREE.RingGeometry(0.85, 1, 40, 1).rotateX(-Math.PI / 2);
   onHurt: ((m: HurtMsg, from: Vec3 | null) => void) | null = null;
+  private parryPending = new Map<number, number>();
+  private landMarkers = new Map<number, THREE.Mesh>();
+  private markerGeo = new THREE.RingGeometry(0.75, 1, 24, 1).rotateX(-Math.PI / 2);
 
   constructor(private scene: THREE.Scene, private fx: FX, private audio: Audio, private selfId: () => string) {}
 
@@ -71,7 +74,10 @@ export class Hazards {
         this.projectiles.set(p[0], v);
         if (kind === 'orb') this.audio.play('laser_small', { at: v.pos, volume: 0.6, pitch: 0.6 });
         else if (kind === 'bolt') this.audio.play('laser_retro', { at: v.pos, volume: 0.35, pitch: 1.8 });
-        else if (kind === 'mortar') this.audio.play('thruster', { at: v.pos, volume: 0.5, pitch: 1.4 });
+        else if (kind === 'mortar') {
+          this.audio.play('thruster', { at: v.pos, volume: 0.5, pitch: 1.4 });
+          this.addLandingMarker(p[0], new THREE.Vector3(p[2], p[3], p[4]), new THREE.Vector3(p[5], p[6], p[7]));
+        }
       }
       if (v.kind !== kind) {
         // parried: restyle as a player projectile
@@ -93,7 +99,36 @@ export class Hazards {
     }
   }
 
+  /** Trace the mortar's ballistic arc and paint a warning ring where it will land. */
+  private addLandingMarker(id: number, p0: THREE.Vector3, v0: THREE.Vector3): void {
+    const g = PROJECTILES.mortar.gravity;
+    const step = 0.04;
+    let prev = p0.clone();
+    for (let t = step; t < 4; t += step) {
+      const p = new THREE.Vector3(p0.x + v0.x * t, p0.y + v0.y * t - 0.5 * g * t * t, p0.z + v0.z * t);
+      const d = p.clone().sub(prev);
+      const len = d.length();
+      const hit = raycastWorld(prev, d.normalize(), len);
+      if (hit) {
+        const at = prev.clone().addScaledVector(d, hit.dist);
+        const m = new THREE.Mesh(this.markerGeo, new THREE.MeshBasicMaterial({ color: 0xff2a10, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+        m.position.set(at.x, at.y + 0.06, at.z);
+        m.scale.setScalar(4.5);
+        this.scene.add(m);
+        this.landMarkers.set(id, m);
+        return;
+      }
+      prev = p;
+    }
+  }
+
   private removeProj(v: ProjView, puff: boolean): void {
+    const mk = this.landMarkers.get(v.id);
+    if (mk) {
+      this.scene.remove(mk);
+      (mk.material as THREE.Material).dispose();
+      this.landMarkers.delete(v.id);
+    }
     if (puff) this.fx.sparks(v.pos, 6, 4, v.kind === 'reflected' ? COLORS.parry : COLORS.fire);
     this.scene.remove(v.sprite);
     if (v.core) this.scene.remove(v.core);
@@ -105,6 +140,14 @@ export class Hazards {
   hide(id: number): void {
     const v = this.projectiles.get(id);
     if (v) { v.reported = true; v.sprite.visible = false; if (v.core) v.core.visible = false; }
+  }
+
+  /**
+   * We punched this projectile: it can't hurt us while the server confirms the parry
+   * (it keeps flying visibly; if the parry is rejected it becomes dangerous again).
+   */
+  markParried(id: number): void {
+    this.parryPending.set(id, performance.now() / 1000);
   }
 
   onEvent(e: GameEvent, probe: PlayerProbe): void {
@@ -176,12 +219,21 @@ export class Hazards {
       if (v.kind === 'mortar' || v.kind === 'reflected') this.fx.fireTrail(v.pos, v.kind === 'reflected' ? COLORS.parry : COLORS.fire, 0.45);
       else if (v.kind === 'orb' && Math.random() < 0.5) this.fx.glow(v.pos, 0.6, COLORS.gold, 0.12, 0.6);
       // hitting the local player
-      if (!v.reported && v.kind !== 'reflected' && probe.alive && !probe.invulnerable) {
+      const pendingAt = this.parryPending.get(v.id);
+      const pending = pendingAt !== undefined && now - pendingAt < 0.5;
+      if (!v.reported && !pending && v.kind !== 'reflected' && probe.alive && !probe.invulnerable) {
         if (dist(v.pos, probe.centre) < def.radius + 0.55) {
           this.hide(v.id);
           this.onHurt?.({ src: 'proj', id: v.id, d: 0 }, v.pos);
         }
       }
+    }
+    for (const [id, mk] of this.landMarkers) {
+      const v = this.projectiles.get(id);
+      if (v && v.kind !== 'mortar') { this.scene.remove(mk); this.landMarkers.delete(id); continue; }
+      const s = 4.5 * (0.85 + Math.sin(now * 14) * 0.15);
+      mk.scale.setScalar(s);
+      mk.rotation.y += dt * 2;
     }
     // shockwaves
     for (let i = this.shocks.length - 1; i >= 0; i--) {
@@ -258,6 +310,9 @@ export class Hazards {
 
   clear(): void {
     for (const v of [...this.projectiles.values()]) this.removeProj(v, false);
+    for (const mk of this.landMarkers.values()) this.scene.remove(mk);
+    this.landMarkers.clear();
+    this.parryPending.clear();
     for (const s of this.shocks) this.scene.remove(s.mesh);
     for (const b of this.beams) this.scene.remove(b.mesh);
     this.shocks = [];

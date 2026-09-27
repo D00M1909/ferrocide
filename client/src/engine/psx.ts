@@ -122,44 +122,45 @@ function grime(ctx: CanvasRenderingContext2D, s: number, rnd: () => number, n: n
 export const Textures = {
   floor: () =>
     makeTex(64, (ctx, s, rnd) => {
-      ctx.fillStyle = '#3b3533';
+      ctx.fillStyle = '#36383c';
       ctx.fillRect(0, 0, s, s);
       // plates
-      ctx.strokeStyle = '#1d1918';
+      ctx.strokeStyle = '#18191c';
       ctx.lineWidth = 2;
       ctx.strokeRect(1, 1, s / 2 - 1, s / 2 - 1);
       ctx.strokeRect(s / 2 + 1, 1, s / 2 - 2, s / 2 - 1);
       ctx.strokeRect(1, s / 2 + 1, s - 2, s / 2 - 2);
-      ctx.fillStyle = '#4a4441';
+      ctx.fillStyle = '#4c4f55';
       ctx.fillRect(3, 3, s / 2 - 5, 2);
       ctx.fillRect(s / 2 + 3, 3, s / 2 - 6, 2);
       // diamond tread
-      ctx.fillStyle = '#2e2927';
+      ctx.fillStyle = '#2a2c30';
       for (let y = s / 2 + 6; y < s - 4; y += 6) for (let x = 5 + ((y / 6) % 2) * 3; x < s - 4; x += 6) ctx.fillRect(x, y, 2, 1);
       // rivets
-      ctx.fillStyle = '#6a605a';
+      ctx.fillStyle = '#767a82';
       for (const [x, y] of [[4, 4], [s / 2 - 5, 4], [s / 2 + 4, 4], [s - 6, 4], [4, s / 2 + 4], [s - 6, s / 2 + 4], [4, s - 6], [s - 6, s - 6]]) ctx.fillRect(x, y, 2, 2);
-      grime(ctx, s, rnd, 26, '#140b09');
-      grime(ctx, s, rnd, 6, '#5a1208');
-      noise(ctx, s, rnd, 26);
+      grime(ctx, s, rnd, 26, '#0e0e10');
+      grime(ctx, s, rnd, 5, '#3e2616');
+      noise(ctx, s, rnd, 24, false);
     }, 3),
   wall: () =>
     makeTex(64, (ctx, s, rnd) => {
-      ctx.fillStyle = '#2a1714';
+      ctx.fillStyle = '#18171a';
       ctx.fillRect(0, 0, s, s);
       const bh = 8;
       for (let row = 0; row < s / bh; row++) {
         const off = (row % 2) * 8;
         for (let x = -off; x < s; x += 16) {
-          const shade = 60 + rnd() * 30;
-          ctx.fillStyle = `rgb(${shade + 20},${shade * 0.45},${shade * 0.38})`;
+          const shade = 58 + rnd() * 30;
+          ctx.fillStyle = `rgb(${shade * 0.8},${shade * 0.76},${shade * 0.78})`;
           ctx.fillRect(x + 1, row * bh + 1, 14, bh - 2);
-          ctx.fillStyle = 'rgba(255,200,180,0.08)';
+          ctx.fillStyle = 'rgba(220,225,240,0.07)';
           ctx.fillRect(x + 1, row * bh + 1, 14, 1);
         }
       }
-      grime(ctx, s, rnd, 30, '#0a0404');
-      noise(ctx, s, rnd, 22);
+      grime(ctx, s, rnd, 30, '#060607');
+      grime(ctx, s, rnd, 4, '#3a1a10');
+      noise(ctx, s, rnd, 20, false);
     }, 7),
   pillar: () =>
     makeTex(64, (ctx, s, rnd) => {
@@ -229,12 +230,12 @@ export const Textures = {
     }, 13),
   stone: () =>
     makeTex(64, (ctx, s, rnd) => {
-      ctx.fillStyle = '#3a2b27';
+      ctx.fillStyle = '#242226';
       ctx.fillRect(0, 0, s, s);
       for (let i = 0; i < 9; i++) {
         const x = (i % 3) * 21 + rnd() * 3, y = Math.floor(i / 3) * 21 + rnd() * 3;
-        const sh = 50 + rnd() * 25;
-        ctx.fillStyle = `rgb(${sh + 12},${sh * 0.72},${sh * 0.62})`;
+        const sh = 52 + rnd() * 25;
+        ctx.fillStyle = `rgb(${sh * 0.86},${sh * 0.8},${sh * 0.78})`;
         ctx.fillRect(x + 1, y + 1, 19, 19);
       }
       // glowing runes carved into the dais
@@ -291,12 +292,12 @@ export const Textures = {
   pad: () =>
     makeTex(32, (ctx, s) => {
       ctx.clearRect(0, 0, s, s);
-      ctx.strokeStyle = '#ffd24a';
+      ctx.strokeStyle = '#48e8ff';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.arc(s / 2, s / 2, s / 2 - 3, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.fillStyle = '#ffd24a';
+      ctx.fillStyle = '#48e8ff';
       ctx.beginPath();
       ctx.moveTo(s / 2, 6);
       ctx.lineTo(s / 2 + 8, 16);
