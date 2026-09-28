@@ -39,16 +39,16 @@ export interface WeaponCtx {
 
 interface Coin { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string }
 interface Core { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string; bounces: number }
-interface Rocket { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string }
+interface Rocket { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string; guided?: boolean; syncT?: number }
 
 const v3 = (p: Vec3): V => [Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100];
 
-interface ViewDef { model: 'revolver_a' | 'shotgun_b' | 'rocket_launcher'; length: number; offset: THREE.Vector3; rot: THREE.Euler; muzzle: THREE.Vector3; kick: number }
+interface ViewDef { model: 'revolver_a' | 'shotgun_b' | 'rocket_launcher'; length: number; offset: THREE.Vector3; rot: THREE.Euler; muzzle: THREE.Vector3; kick: number; thick?: number }
 
 const VIEW: Record<WeaponId, ViewDef> = {
   // models are auto-oriented on load (barrel -> -Z, grip -> -Y); rot is a small artistic cant
   revolver: { model: 'revolver_a', length: 0.36, offset: new THREE.Vector3(0.2, -0.2, -0.44), rot: new THREE.Euler(0.04, -0.06, 0), muzzle: new THREE.Vector3(0, 0.03, -0.2), kick: 1 },
-  shotgun: { model: 'shotgun_b', length: 0.7, offset: new THREE.Vector3(0.22, -0.24, -0.5), rot: new THREE.Euler(0.04, -0.05, 0), muzzle: new THREE.Vector3(0, 0.03, -0.36), kick: 1.6 },
+  shotgun: { model: 'shotgun_b', length: 0.62, offset: new THREE.Vector3(0.2, -0.165, -0.44), rot: new THREE.Euler(0.03, -0.14, 0.05), muzzle: new THREE.Vector3(0, 0.03, -0.32), kick: 1.6, thick: 1.45 },
   launcher: { model: 'rocket_launcher', length: 0.55, offset: new THREE.Vector3(0.28, -0.23, -0.56), rot: new THREE.Euler(0.03, -0.05, 0), muzzle: new THREE.Vector3(0, 0.04, -0.3), kick: 1.3 },
 };
 
@@ -67,6 +67,8 @@ export class Weapons {
   private pumpT = 0;
   private cooldowns: Record<WeaponId, number> = { revolver: 0, shotgun: 0, launcher: 0 };
   private punchCd = 0;
+  private parryWindow = 0; // a live punch keeps looking for something to parry
+  private altHeldT = -1; // launcher alt: how long it has been held (-1 = not held)
   punchT = 0;
   coins: number = WEAPONS.revolver.coinCharges;
   private coinRegen = 0;
@@ -116,6 +118,8 @@ export class Weapons {
   private buildView(w: WeaponId): THREE.Object3D {
     const def = VIEW[w];
     const m = staticModel(def.model, def.length, { hue: w === 'launcher' ? -0.3 : 0, sat: 0.8, bright: 1.1 });
+    // the stock shotgun is a slim hunting gun: fatten its cross-section so it reads as a hammer
+    if (def.thick) { m.scale.x *= def.thick; m.scale.y *= def.thick; }
     m.rotation.copy(def.rot);
     const g = new THREE.Object3D();
     g.add(m);
@@ -229,9 +233,14 @@ export class Weapons {
         this.select(WEAPON_ORDER[i]);
       }
       if (input.wasPressed('punch')) this.punch(ctx);
+      else if (this.parryWindow > 0) {
+        this.parryWindow -= realDt;
+        if (this.tryParry(ctx)) this.parryWindow = 0;
+      }
       if (this.switchT <= 0) {
         if (input.isDown('fire') && this.cooldowns[this.current] <= 0) this.fire(ctx);
-        if (input.wasPressed('alt')) this.alt(ctx);
+        if (this.current === 'launcher') this.launcherAlt(input, ctx, realDt);
+        else if (input.wasPressed('alt')) this.alt(ctx);
       }
     }
 
@@ -279,7 +288,7 @@ export class Weapons {
         const res = this.traceFirst(ctx, ctx.eye, d, S.range);
         if (res.core) { this.detonateCore(res.core, ctx, true); continue; }
         if (res.enemy) {
-          const close = res.enemy.dist < 4 ? 1.35 : 1;
+          const close = res.enemy.dist < S.closeRange ? S.closeMult : 1;
           const cur = agg.get(res.enemy.view) ?? { dmg: 0, head: false, point: res.enemy.point };
           cur.dmg += S.pelletDamage * close * (res.enemy.head ? 1.25 : 1);
           cur.head = cur.head || res.enemy.head;
@@ -290,7 +299,13 @@ export class Weapons {
         }
         if (i < 5) { ctx.fx.tracer(muzzle, res.end, 0xffd080, 0.02, 0.06, () => this.muzzleWorld(ctx)); tos.push(v3(res.end)); }
       }
-      for (const [view, h] of agg) ctx.damage(view, h.dmg, 'shotgun', h.head, h.point, ctx.fwd);
+      let big = false;
+      for (const [view, h] of agg) {
+        ctx.damage(view, h.dmg, 'shotgun', h.head, h.point, ctx.fwd);
+        if (h.dmg >= S.staggerDamage) big = true;
+      }
+      // a point-blank blast lands with weight: a sliver of hit-stop and a harder kick
+      if (big) { ctx.fx.freeze(0.04); ctx.fx.shake(0.4); }
       ctx.sendFx({ t: 'shot', w: 'shotgun', from: v3(muzzle), to: tos });
     } else {
       const L = WEAPONS.launcher;
@@ -339,13 +354,28 @@ export class Weapons {
       this.spawnCore(id, p, vel, true, this.selfId());
       ctx.audio.play('laser_retro', { volume: 0.6, pitch: 0.7 });
       ctx.sendFx({ t: 'core', id, p: v3(p), v: v3(vel) });
-    } else {
-      // remote detonation of every rocket in flight
-      const mine = this.rockets.filter((r) => r.local);
-      if (!mine.length) { ctx.audio.synth('denied'); return; }
-      for (const r of mine) this.explodeRocket(r, ctx, null, 1.15);
-      if (mine.length >= 2) ctx.style('AIRBURST', 40 * mine.length);
     }
+  }
+
+  /** Launcher alt: hold to steer every rocket in flight toward the crosshair, tap to airburst them. */
+  private launcherAlt(input: Input, ctx: WeaponCtx, dt: number): void {
+    const L = WEAPONS.launcher;
+    if (input.isDown('alt')) {
+      this.altHeldT = this.altHeldT < 0 ? 0 : this.altHeldT + dt;
+      return;
+    }
+    if (this.altHeldT < 0) return;
+    const tap = this.altHeldT <= L.guideHoldTime;
+    this.altHeldT = -1;
+    if (!tap) return; // released after steering: the rockets fly on
+    const mine = this.rockets.filter((r) => r.local);
+    if (!mine.length) { ctx.audio.synth('denied'); return; }
+    for (const r of mine) this.explodeRocket(r, ctx, null, L.airburstRadiusMult);
+    if (mine.length >= 2) ctx.style('AIRBURST', 40 * mine.length);
+  }
+
+  private get guiding(): boolean {
+    return this.current === 'launcher' && this.altHeldT > WEAPONS.launcher.guideHoldTime;
   }
 
   private punch(ctx: WeaponCtx): void {
@@ -353,18 +383,9 @@ export class Weapons {
     this.punchCd = PUNCH.interval;
     this.punchT = 0.28;
     ctx.sendFx({ t: 'punch' });
-    // parry beats everything
-    const cands = ctx.hazards.parryCandidates(ctx.eye, ctx.fwd, PUNCH.parryRange, PUNCH.parryCone);
-    if (cands.length) {
-      const pr = cands[0];
-      const aim = this.aimPoint(ctx, 200);
-      const dir = aim.sub(pr.pos).normalize();
-      ctx.parry(pr.id, dir, this.aimPoint(ctx, 200));
-      ctx.hazards.markParried(pr.id);
-      ctx.fx.glow(pr.pos, 3.5, COLORS.parry, 0.25);
-      ctx.fx.sparks(pr.pos, 30, 14, COLORS.parry, 0.15);
-      return;
-    }
+    // parry beats everything; if nothing is in reach yet, the punch stays live for a moment
+    if (this.tryParry(ctx)) return;
+    this.parryWindow = PUNCH.parryBuffer;
     // punch the nearest enemy in front of us
     let target: EnemyView | null = null;
     let best = PUNCH.range + 1;
@@ -397,6 +418,26 @@ export class Weapons {
         ctx.style('HOMERUN', 60);
       }
     }
+  }
+
+  /** Parry the nearest parryable projectile in reach, if any. */
+  private tryParry(ctx: WeaponCtx): boolean {
+    const cands = ctx.hazards.parryCandidates(ctx.eye, ctx.fwd, PUNCH.parryRange, PUNCH.parryCone);
+    if (!cands.length) return false;
+    let pr = cands[0], best = Infinity;
+    for (const c of cands) {
+      const d = c.pos.distanceTo(ctx.eye);
+      if (d < best) { best = d; pr = c; }
+    }
+    const aim = this.aimPoint(ctx, 200);
+    const dir = aim.clone().sub(pr.pos).normalize();
+    ctx.parry(pr.id, dir, aim);
+    ctx.hazards.markParried(pr.id);
+    ctx.fx.glow(pr.pos, 3.5, COLORS.parry, 0.25);
+    ctx.fx.sparks(pr.pos, 30, 14, COLORS.parry, 0.15);
+    this.punchT = Math.max(this.punchT, 0.2);
+    this.punchCd = Math.min(this.punchCd, PUNCH.parryChainCd);
+    return true;
   }
 
   // ------------------------------------------------------------------ hitscan
@@ -655,6 +696,7 @@ export class Weapons {
     if (direct) {
       ctx.damage(direct, L.directDamage, 'rocket', false, r.pos, r.vel.clone().normalize());
       if (!ctx.motor.grounded) ctx.style('AIRSHOT', 60);
+      if (r.guided) ctx.style('GUIDED', 50);
     }
     ctx.explode(r.pos, L.splashRadius * radiusMul, L.splashDamage, 'rocket', L.selfKnockback, L.selfDamage);
     ctx.fx.explosion(r.pos, L.splashRadius * 0.8 * radiusMul);
@@ -662,8 +704,10 @@ export class Weapons {
   }
 
   private updateRockets(dt: number, ctx: WeaponCtx): void {
+    const aim = this.guiding && this.rockets.some((r) => r.local) ? this.aimPoint(ctx, 200) : null;
     for (const r of [...this.rockets]) {
       r.life -= dt;
+      if (aim && r.local) this.steerRocket(r, aim, dt, ctx);
       const step = r.vel.length() * dt;
       const dir = r.vel.clone().normalize();
       ctx.fx.fireTrail(r.pos, COLORS.fire, 0.35);
@@ -699,6 +743,30 @@ export class Weapons {
     }
   }
 
+  /** Turn a rocket toward the aim point at a limited rate, speeding up, and keep the partner in sync. */
+  private steerRocket(r: Rocket, aim: THREE.Vector3, dt: number, ctx: WeaponCtx): void {
+    const L = WEAPONS.launcher;
+    const want = aim.clone().sub(r.pos);
+    if (want.lengthSq() < 0.25) return;
+    want.normalize();
+    const speed = Math.min(L.guideMaxSpeed, r.vel.length() + L.guideAccel * dt);
+    const cur = r.vel.clone().normalize();
+    const ang = Math.acos(Math.max(-1, Math.min(1, cur.dot(want))));
+    const t = ang > 1e-4 ? Math.min(1, (L.guideTurnRate * dt) / ang) : 1;
+    r.vel.copy(cur.lerp(want, t).normalize().multiplyScalar(speed));
+    r.mesh.lookAt(r.pos.x + r.vel.x, r.pos.y + r.vel.y, r.pos.z + r.vel.z);
+    if (!r.guided) {
+      r.guided = true;
+      const glow = r.mesh.children[1] as THREE.Sprite | undefined;
+      if (glow) { (glow.material as THREE.SpriteMaterial).color.setHex(0xfff0c0); glow.scale.setScalar(1.5); }
+    }
+    r.syncT = (r.syncT ?? 0) - dt;
+    if (r.syncT <= 0) {
+      r.syncT = 0.1;
+      ctx.sendFx({ t: 'rocket', id: r.id, p: v3(r.pos), v: v3(r.vel) });
+    }
+  }
+
   // ------------------------------------------------------------------ remote fx
 
   remoteFx(from: string, m: FxMsg, fx: FX, audio: Audio): void {
@@ -715,7 +783,20 @@ export class Weapons {
         for (let i = 0; i + 1 < m.pts.length; i++) fx.tracer(P(m.pts[i]), P(m.pts[i + 1]), 0xe0f0ff, 0.06, 0.25);
         audio.play('coin', { at: P(m.pts[Math.min(1, m.pts.length - 1)]), volume: 0.8, pitch: 1.5 });
         break;
-      case 'rocket': this.spawnRocket(m.id, P(m.p), P(m.v), false, from); audio.play('rocket', { at: P(m.p), volume: 0.6 }); break;
+      case 'rocket': {
+        const r = this.rockets.find((x) => x.owner === from && x.id === m.id);
+        if (r) {
+          // a guided rocket's course correction
+          r.pos.set(m.p[0], m.p[1], m.p[2]);
+          r.vel.set(m.v[0], m.v[1], m.v[2]);
+          r.mesh.position.copy(r.pos);
+          r.mesh.lookAt(r.pos.x + r.vel.x, r.pos.y + r.vel.y, r.pos.z + r.vel.z);
+          break;
+        }
+        this.spawnRocket(m.id, P(m.p), P(m.v), false, from);
+        audio.play('rocket', { at: P(m.p), volume: 0.6 });
+        break;
+      }
       case 'rocketdie': this.removeRemoteRocket(from, m.id); break;
       case 'core': this.spawnCore(m.id, P(m.p), P(m.v), false, from); break;
       case 'coredie': this.removeRemoteCore(from, m.id); break;

@@ -152,7 +152,7 @@ export class HUD {
     });
     if (s.weapon === 'revolver') this.altInfo.textContent = `COINS ${'●'.repeat(s.coins)}${'○'.repeat(WEAPONS.revolver.coinCharges - s.coins)}`;
     else if (s.weapon === 'shotgun') this.altInfo.textContent = s.coreCd > 0 ? `CORE ${s.coreCd.toFixed(1)}s` : 'CORE READY';
-    else this.altInfo.textContent = 'ALT: DETONATE';
+    else this.altInfo.textContent = 'ALT: TAP BURST · HOLD STEER';
 
     // style
     const r = s.style.rank;

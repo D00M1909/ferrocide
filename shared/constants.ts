@@ -69,10 +69,13 @@ export const WEAPONS = {
   },
   shotgun: {
     name: 'SCATTERHAMMER',
-    pellets: 11,
-    pelletDamage: 9,
-    spread: 0.11, // radians
-    interval: 0.82,
+    pellets: 12,
+    pelletDamage: 11,
+    spread: 0.095, // radians
+    interval: 0.72,
+    closeRange: 6, // point-blank bonus inside this distance
+    closeMult: 1.45,
+    staggerDamage: 60, // one blast this strong interrupts a light enemy's attack
     range: 60,
     coreCooldown: 2.8,
     coreSpeed: 26,
@@ -93,6 +96,12 @@ export const WEAPONS = {
     selfKnockback: 17,
     selfDamage: 12,
     rocketLife: 4,
+    // alt fire: hold to steer rockets toward the crosshair, tap to airburst them
+    guideTurnRate: 4.2, // rad/s
+    guideMaxSpeed: 60,
+    guideAccel: 30,
+    guideHoldTime: 0.16, // alt held longer than this steers instead of detonating
+    airburstRadiusMult: 1.35,
   },
 } as const;
 
@@ -108,10 +117,12 @@ export const HEALTH_PICKUP = {
 
 export const PUNCH = {
   damage: 22,
-  interval: 0.42,
+  interval: 0.36,
   range: 3.2,
-  parryRange: 4.2,
-  parryCone: 0.55, // dot threshold
+  parryRange: 5,
+  parryCone: 0.45, // dot threshold
+  parryBuffer: 0.14, // a punch stays "live" this long, so a slightly early press still parries
+  parryChainCd: 0.1, // a successful parry nearly resets the punch for parry chains
   parrySpeed: 70,
   parryDamageMult: 4,
   parryHeal: 50,

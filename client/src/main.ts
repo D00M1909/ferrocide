@@ -186,8 +186,8 @@ function controlsScreen(back: () => void): void {
       <div class="controls">
         <div><b>PIERCER</b> piercing revolver</div><div>RMB tosses a coin — shoot it to ricochet into a head</div>
         <div><b>SCATTERHAMMER</b> shotgun</div><div>RMB lobs a core — shoot or punch it to detonate</div>
-        <div><b>SLAGTHROWER</b> rockets</div><div>RMB detonates rockets mid-air · rocket jump!</div>
-        <div><b>PARRY</b> punch yellow orbs/mortars</div><div>reflects them, heals ${50} HP</div>
+        <div><b>SLAGTHROWER</b> rockets</div><div>hold RMB to steer rockets to your crosshair · tap to airburst · rocket jump!</div>
+        <div><b>PARRY</b> punch yellow orbs/mortars</div><div>press a beat early, it still counts · reflects them, heals ${50} HP</div>
       </div>
       <div style="margin-top:18px"><button id="back">BACK</button></div>
     </div>`);

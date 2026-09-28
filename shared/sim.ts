@@ -98,12 +98,12 @@ const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === '
 const HIT_CAP: Partial<Record<HitKind, number>> = {
   revolver: WEAPONS.revolver.damage * WEAPONS.revolver.headshotMult + 1,
   ricoshot: WEAPONS.revolver.damage * WEAPONS.revolver.headshotMult * WEAPONS.revolver.ricochetMult ** 4 + 1,
-  shotgun: WEAPONS.shotgun.pellets * WEAPONS.shotgun.pelletDamage * 1.35 * 1.25 + 1,
+  shotgun: WEAPONS.shotgun.pellets * WEAPONS.shotgun.pelletDamage * WEAPONS.shotgun.closeMult * 1.25 + 1,
   punch: PUNCH.damage + 1,
   rocket: WEAPONS.launcher.directDamage + 1,
 };
 const BOOM_CAP: Partial<Record<HitKind, { r: number; d: number }>> = {
-  rocket: { r: WEAPONS.launcher.splashRadius * 1.2, d: WEAPONS.launcher.splashDamage },
+  rocket: { r: WEAPONS.launcher.splashRadius * WEAPONS.launcher.airburstRadiusMult + 0.1, d: WEAPONS.launcher.splashDamage },
   core: { r: WEAPONS.shotgun.coreShotRadius, d: WEAPONS.shotgun.coreShotDamage },
   slam: { r: SLAM.radius, d: SLAM.baseDamage + SLAM.damagePerMeter * 40 },
 };
@@ -281,6 +281,11 @@ export class GameSim {
       e.stateT = 1.1;
       this.emit({ t: 'stun', id: e.id, by: id });
       dmg *= 1.5;
+    } else if (k === 'shotgun' && dmg >= WEAPONS.shotgun.staggerDamage && e.state === 'windup' && !ENEMIES[e.kind].heavy) {
+      // a point-blank blast knocks a light enemy out of its attack
+      e.state = 'stun';
+      e.stateT = 0.7;
+      this.emit({ t: 'stun', id: e.id, by: id });
     }
     this.damageEnemy(e, dmg, id, k, hs, p);
   }
