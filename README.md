@@ -3,7 +3,7 @@
 **A fast, retro PS1-style arena shooter for the browser, with 2-player online co-op.**
 Dash, slide, slam and wall-jump through a molten foundry while you shoot, parry and punch your way through eight waves and a boss. Blood is fuel: you heal by hurting things up close.
 
-### ▶ [Play it now: ferrocide.pages.dev](https://ferrocide.pages.dev)
+### [Play it now: ferrocide.pages.dev](https://ferrocide.pages.dev)
 Runs in any modern desktop browser. No install, no account. Solo starts instantly; co-op takes a 4-letter room code.
 
 ![Wave 6 in the foundry](docs/screenshots/combat.jpg)
