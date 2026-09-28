@@ -3,11 +3,16 @@
 import * as THREE from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { psxify, Textures, type PsxOptions } from './psx';
 
 export const MODEL_FILES = [
-  'enemy_large', 'enemy_small', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher',
+  'enemy_small', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher',
+  // humanoid enemies (Quaternius Universal kits, built by tools/build-humanoids.mjs): meshes only,
+  // animated by the shared clip library below since they all use the same rig
+  'h_peasant', 'h_ranger_m', 'h_ranger_f', 'h_hero',
 ] as const;
+const HUMANOID_ANIMS = 'h_anims';
 export type ModelName = (typeof MODEL_FILES)[number];
 
 export const SPRITE_FILES = [
@@ -21,15 +26,21 @@ const models = new Map<ModelName, GLTF>();
 const sprites = new Map<SpriteName, THREE.Texture>();
 
 export async function loadAssets(onProgress: (f: number) => void): Promise<void> {
-  const loader = new GLTFLoader();
+  const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   const texLoader = new THREE.TextureLoader();
-  const total = MODEL_FILES.length + SPRITE_FILES.length;
+  const total = MODEL_FILES.length + SPRITE_FILES.length + 1;
+  const humanoidClips = loader.loadAsync(`/assets/models/${HUMANOID_ANIMS}.glb`).then((g) => g.animations).catch((e) => {
+    console.warn('humanoid animations failed', e);
+    return [] as THREE.AnimationClip[];
+  });
   let done = 0;
   const tick = () => onProgress(++done / total);
   await Promise.all([
     ...MODEL_FILES.map(async (m) => {
       try {
-        models.set(m, await loader.loadAsync(`/assets/models/${m}.glb`));
+        const g = await loader.loadAsync(`/assets/models/${m}.glb`);
+        if (m.startsWith('h_')) g.animations = await humanoidClips;
+        models.set(m, g);
       } catch (e) {
         console.warn('model failed', m, e);
       }
@@ -48,6 +59,8 @@ export async function loadAssets(onProgress: (f: number) => void): Promise<void>
       tick();
     }),
   ]);
+  await humanoidClips;
+  tick();
 }
 
 export function sprite(name: SpriteName): THREE.Texture {

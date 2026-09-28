@@ -1,0 +1,59 @@
+<!doctype html>
+<html><body style="margin:0;background:#000;overflow:hidden">
+<canvas id="c" style="width:100vw;height:100vh;display:block;image-rendering:pixelated"></canvas>
+<div id="lbl" style="position:fixed;left:12px;top:8px;color:#fff;font:14px monospace"></div>
+<script type="module">
+// dev preview of enemy skins in the real arena lighting: /enemyview.html?anim=move&kinds=husk,warden
+import * as THREE from 'three';
+import { loadAssets, sprite } from './src/engine/assets';
+import { RetroRenderer } from './src/engine/renderer';
+import { World } from './src/game/world';
+import { EnemyView } from './src/game/enemies';
+await loadAssets(() => {});
+const q = new URLSearchParams(location.search);
+const kinds = (q.get('kinds') || 'husk,stalker,warden,brute').split(',');
+const anim = q.get('anim') || 'move';
+const world = new World();
+const r = new RetroRenderer(document.getElementById('c'));
+r.internalHeight = Number(q.get('res') || 480);
+r.resize();
+addEventListener('resize', () => { r.resize(); cam.aspect = r.aspect; cam.updateProjectionMatrix(); });
+const cam = new THREE.PerspectiveCamera(70, r.aspect, 0.05, 600);
+const zc = Number(q.get('z') || 3.5);
+cam.position.set(0, Number(q.get('y') || 1.9), zc);
+cam.lookAt(0, Number(q.get('ly') || 1.7), 13);
+const views = kinds.map((k, i) => {
+  const v = new EnemyView(i + 1, k, world.scene, sprite('light_01'));
+  v.pos.set((i - (kinds.length - 1) / 2) * -2.6, 0, k === 'brute' ? 13 : 9.5);
+  v.yaw = 0; // forward is -Z: face the camera
+  const [key, atk] = anim.split(':');
+  v.play(key, atk || '', false);
+  return v;
+});
+document.getElementById('lbl').textContent = `${kinds.join('  ·  ')}   [${anim}]`;
+let t = 0, last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
+  world.update(dt, t);
+  for (const v of views) {
+    v.inst.mixer?.update(dt);
+    v.inst.root.position.copy(v.pos);
+    v.inst.root.rotation.y = v.yaw + Math.PI;
+    v.inst.root.updateMatrixWorld(true);
+    // (mirrors Enemies.update for humanoids)
+    v.headBone.getWorldPosition(v.headWorld);
+    const m = v.headBone.matrixWorld.elements, k = (v.def.height * 0.045) / Math.hypot(m[4], m[5], m[6]);
+    v.headWorld.x += m[4] * k; v.headWorld.y += m[5] * k; v.headWorld.z += m[6] * k;
+    const h = v.def.height * 0.062, uz = Math.hypot(m[8], m[9], m[10]);
+    v.eyes.position.set(v.headWorld.x + (m[8] / uz) * h, v.headWorld.y + (m[9] / uz) * h, v.headWorld.z + (m[10] / uz) * h);
+    v.horns.position.copy(v.headWorld); v.horns.rotation.y = v.yaw;
+  }
+  if (!document.getElementById('c').width) { r.resize(); cam.aspect = r.aspect; cam.updateProjectionMatrix(); }
+  r.render(world.scene, cam, null, null);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__views = views;
+window.__ready = true;
+</script>
+</body></html>

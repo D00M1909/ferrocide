@@ -19,7 +19,7 @@ function copy(src, dest) {
 }
 
 // Models (Quaternius via Poly Pizza, public domain)
-for (const m of ['enemy_large', 'enemy_small', 'enemy_flying', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher']) {
+for (const m of ['enemy_small', 'enemy_flying', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher']) {
   copy(`polypizza/${m}.glb`, `models/${m}.glb`);
 }
 

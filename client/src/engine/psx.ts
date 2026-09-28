@@ -16,6 +16,7 @@ export interface PsxOptions {
   flashColor?: THREE.Color;
   snap?: boolean;
   rim?: THREE.Color; // fresnel rim light so enemies pop out of the murk
+  rimPow?: number; // fresnel exponent: higher = thinner edge-only rim (default 2.2)
 }
 
 /** Patches any built-in material with PSX vertex snapping plus optional colour grading. */
@@ -29,6 +30,7 @@ export function psxify<T extends THREE.Material>(mat: T, opts: PsxOptions = {}):
   const bright = { value: opts.bright ?? 1 };
   const rim = { value: opts.rim ?? new THREE.Color(0, 0, 0) };
   const hasRim = !!opts.rim;
+  const rimPow = { value: opts.rimPow ?? 2.2 };
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSnap = psxUniforms.uSnap;
     shader.uniforms.uFlash = flash;
@@ -37,6 +39,7 @@ export function psxify<T extends THREE.Material>(mat: T, opts: PsxOptions = {}):
     shader.uniforms.uSat = sat;
     shader.uniforms.uBright = bright;
     shader.uniforms.uRim = rim;
+    shader.uniforms.uRimPow = rimPow;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nuniform vec2 uSnap;')
       .replace(
@@ -48,7 +51,7 @@ export function psxify<T extends THREE.Material>(mat: T, opts: PsxOptions = {}):
       .replace(
         '#include <common>',
         `#include <common>
-        uniform float uFlash; uniform vec3 uFlashColor; uniform float uHue; uniform float uSat; uniform float uBright; uniform vec3 uRim;
+        uniform float uFlash; uniform vec3 uFlashColor; uniform float uHue; uniform float uSat; uniform float uBright; uniform vec3 uRim; uniform float uRimPow;
         vec3 hueRotate(vec3 c, float a) {
           const vec3 k = vec3(0.57735);
           float ca = cos(a);
@@ -65,7 +68,7 @@ export function psxify<T extends THREE.Material>(mat: T, opts: PsxOptions = {}):
       .replace(
         '#include <dithering_fragment>',
         `#include <dithering_fragment>
-        ${hasRim ? 'float fres = pow(1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0), 2.2); gl_FragColor.rgb += uRim * fres;' : ''}
+        ${hasRim ? 'float fres = pow(1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0), uRimPow); gl_FragColor.rgb += uRim * fres;' : ''}
         gl_FragColor.rgb = mix(gl_FragColor.rgb, uFlashColor, clamp(uFlash, 0.0, 1.0));`,
       );
   };

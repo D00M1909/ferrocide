@@ -19,6 +19,8 @@ interface Skin {
   eyeSize: number;
   horns: number; // number of horn spikes (0 = none)
   bulk?: number; // non-uniform scale: widen the body
+  rimK?: number; // rim light strength (default 0.8)
+  humanoid?: boolean; // Universal rig: eyes sit on the face, found from the head bone + body height
   metal?: boolean; // gib palette
   anims: Partial<Record<EnemyState | 'death' | 'idle' | 'leap' | 'hit', string[]>>;
   attackAnims?: Record<string, string[]>;
@@ -27,31 +29,44 @@ interface Skin {
 // Palette rule: the world is cold grey metal; enemies are bone/iron with hot red eyes
 // and a red rim; saturated red is reserved for blood, yellow only for parryable shots.
 const SKINS: Record<EnemyKind, Skin> = {
+  // humanoids share one rig + clip library (Quaternius Universal Animation Library 1+2)
   husk: {
-    model: 'enemy_large', hue: -2.25, sat: 0.12, bright: 1.2, rim: 0xff3020, eyes: 0xff2010, eyeSize: 0.22, horns: 2, bulk: 0.9,
-    anims: { move: ['Run'], idle: ['Idle'], windup: ['Punch'], recover: ['Idle'], stun: ['HitReact'], death: ['Death'], leap: ['Jump'], spawn: ['Idle'], hit: ['HitReact'] },
+    // foundry workers, hollowed out: ash-grey rags, burning eyes
+    model: 'h_peasant', humanoid: true, rimK: 0.7, hue: 0, sat: 0.18, bright: 0.72, emissive: 0x060101, rim: 0xff3020, eyes: 0xff2010, eyeSize: 0.12, horns: 0,
+    anims: {
+      move: ['Jog_Fwd_Loop'], idle: ['Zombie_Idle_Loop'], windup: ['Zombie_Scratch', 'Punch_Cross'], recover: ['Zombie_Idle_Loop'], stun: ['Hit_Knockback'],
+      death: ['Death01'], leap: ['Jump_Loop'], spawn: ['Zombie_Idle_Loop'], hit: ['Hit_Chest'],
+    },
   },
   eye: {
     model: 'enemy_small', hue: -2.3, sat: 0.35, bright: 1.05, emissive: 0x100000, rim: 0xff4020, eyes: 0xff3010, eyeSize: 0.3, horns: 3,
     anims: { move: ['Fast_Flying'], idle: ['Flying_Idle'], windup: ['Headbutt'], dive: ['Fast_Flying'], death: ['Death'], spawn: ['Flying_Idle'], stun: ['HitReact'] },
   },
   warden: {
-    model: 'mech', hue: -2.05, sat: 0.14, bright: 0.8, rim: 0xff5a20, eyes: 0xff2a10, eyeSize: 0.35, horns: 0, metal: true,
-    anims: { move: ['Walk'], idle: ['Idle'], windup: ['Shoot_Small'], recover: ['Idle'], stun: ['HitRecieve_1'], death: ['Death'], spawn: ['Idle'] },
+    // hooded slag-priest that hurls molten orbs
+    model: 'h_ranger_m', humanoid: true, rimK: 0.7, hue: 0.35, sat: 0.3, bright: 0.62, emissive: 0x0a0402, rim: 0xff5a20, eyes: 0xff6a10, eyeSize: 0.14, horns: 0,
+    anims: {
+      move: ['Walk_Loop'], idle: ['Spell_Simple_Idle_Loop'], windup: ['Spell_Simple_Shoot'], recover: ['Spell_Simple_Idle_Loop'], stun: ['Hit_Chest'],
+      death: ['Death01'], spawn: ['Spell_Simple_Enter', 'Idle_Loop'],
+    },
   },
   drone: {
     model: 'robot_flying', hue: 0.3, sat: 0.1, bright: 0.95, rim: 0xff5a20, eyes: 0xff2010, eyeSize: 0.4, horns: 0, metal: true,
     anims: { move: ['Run'], idle: ['Idle'], windup: ['Shoot'], attack: ['Shoot'], death: ['Dead'], spawn: ['Idle'], stun: ['Idle'] },
   },
   brute: {
-    model: 'enemy_large', hue: -2.0, sat: 0.3, bright: 0.55, emissive: 0x140202, rim: 0xff4a10, eyes: 0xff7a10, eyeSize: 0.45, horns: 4, bulk: 1.3,
-    anims: { move: ['Walk'], idle: ['Idle'], recover: ['Idle'], death: ['Death'], spawn: ['Idle'], stun: ['HitReact'] },
-    attackAnims: { smash: ['Punch'], stomp: ['Jump'], mortar: ['Weapon', 'Wave'] },
+    // a furnace-scorched giant: charcoal skin, horns, ember eyes
+    model: 'h_hero', humanoid: true, rimK: 0.7, hue: 0, sat: 0.1, bright: 0.16, emissive: 0x050000, rim: 0xff4a10, eyes: 0xff7a10, eyeSize: 0.24, horns: 4, bulk: 1.2,
+    anims: { move: ['Walk_Loop'], idle: ['Idle_FoldArms_Loop'], recover: ['Idle_Loop'], death: ['Death01'], spawn: ['Idle_FoldArms_Loop'], stun: ['Hit_Knockback'] },
+    attackAnims: { smash: ['Melee_Hook', 'Punch_Cross'], stomp: ['NinjaJump_Start', 'Jump_Start'], mortar: ['OverhandThrow'] },
   },
   stalker: {
     // lean, near-black flanker with violet-white eyes (distinct from the bone husks)
-    model: 'enemy_large', hue: -1.2, sat: 0.2, bright: 0.32, emissive: 0x0a0010, rim: 0xb040ff, eyes: 0xe0b0ff, eyeSize: 0.2, horns: 2, bulk: 0.75,
-    anims: { move: ['Run'], idle: ['Idle'], windup: ['Punch'], recover: ['Idle'], stun: ['HitReact'], death: ['Death'], spawn: ['Idle'], hit: ['HitReact'] },
+    model: 'h_ranger_f', humanoid: true, rimK: 0.8, hue: -1.2, sat: 0.25, bright: 0.3, emissive: 0x0a0010, rim: 0xb040ff, eyes: 0xe0b0ff, eyeSize: 0.12, horns: 0,
+    anims: {
+      move: ['Sprint_Loop'], idle: ['Crouch_Idle_Loop'], windup: ['Sword_Dash', 'Melee_Hook'], recover: ['Crouch_Idle_Loop'], stun: ['Hit_Knockback'],
+      death: ['Death01'], spawn: ['Crouch_Idle_Loop'], hit: ['Hit_Head'],
+    },
   },
   colossus: {
     model: 'mech', hue: -2.4, sat: 0.3, bright: 0.45, emissive: 0x2a0600, rim: 0xff6a10, eyes: 0xff8a10, eyeSize: 1.1, horns: 6, metal: true, bulk: 1.15,
@@ -111,8 +126,9 @@ export class EnemyView {
       bright: skin.bright,
       emissive: skin.emissive ? new THREE.Color(skin.emissive) : undefined,
       flashColor: new THREE.Color(1, 1, 1),
-      rim: new THREE.Color(skin.rim).multiplyScalar(0.8),
-      eyeless: skin.model === 'enemy_large' || skin.model === 'enemy_small',
+      rim: new THREE.Color(skin.rim).multiplyScalar(skin.rimK ?? 0.8),
+      rimPow: skin.humanoid ? 4.5 : 2.2,
+      eyeless: skin.model === 'enemy_small',
     });
     if (skin.bulk) {
       this.inst.inner.scale.x *= skin.bulk;
@@ -128,9 +144,11 @@ export class EnemyView {
       const h = new THREE.Mesh(hornGeo, hornMat);
       const side = i % 2 === 0 ? 1 : -1;
       const row = Math.floor(i / 2);
-      const sz = this.def.height * (this.def.flying ? 0.5 : 0.23);
+      // humanoid heads are small relative to the body: smaller horns rooted on the crown
+      const sz = this.def.height * (this.def.flying ? 0.5 : skin.humanoid ? 0.1 : 0.23);
       h.scale.set(sz * 0.35, sz * (1.4 - row * 0.25), sz * 0.35);
-      h.position.set(side * sz * (0.45 + row * 0.25), sz * 0.35, sz * (0.1 + row * 0.35));
+      if (skin.humanoid) h.position.set(side * sz * (0.5 + row * 0.2), sz * 0.55, sz * (-0.1 + row * 0.35));
+      else h.position.set(side * sz * (0.45 + row * 0.25), sz * 0.35, sz * (0.1 + row * 0.35));
       h.rotation.set(-0.35 - row * 0.3, 0, -side * 0.45);
       this.horns.add(h);
     }
@@ -415,12 +433,25 @@ export class Enemies {
         v.inst.root.updateMatrixWorld(true);
         v.headBone.getWorldPosition(v.headWorld);
         v.headValid = true;
+        if (v.skin.humanoid) {
+          // the rig's head bone sits at the base of the skull: shift up its own axis to the skull's
+          // centre so headshots, eyes and horns all line up with the visible head
+          const m = v.headBone.matrixWorld.elements, k = (v.def.height * 0.045) / (Math.hypot(m[4], m[5], m[6]) || 1);
+          v.headWorld.x += m[4] * k; v.headWorld.y += m[5] * k; v.headWorld.z += m[6] * k;
+        }
       } else {
         v.headWorld.set(v.pos.x, v.pos.y + (v.def.flying ? 0 : v.def.headY), v.pos.z);
       }
       const hfx = -Math.sin(v.yaw), hfz = -Math.cos(v.yaw);
-      const hs = v.def.flying ? v.def.radius : v.def.headR;
-      v.eyes.position.set(v.headWorld.x + hfx * hs * 0.9, v.headWorld.y + hs * 0.15, v.headWorld.z + hfz * hs * 0.9);
+      if (v.skin.humanoid && v.headBone) {
+        // eyes on the face (the head bone's +Z points out of it), so they follow a bowed or turned head
+        const m = v.headBone.matrixWorld.elements, h = v.def.height * 0.062;
+        const uz = Math.hypot(m[8], m[9], m[10]) || 1;
+        v.eyes.position.set(v.headWorld.x + (m[8] / uz) * h, v.headWorld.y + (m[9] / uz) * h, v.headWorld.z + (m[10] / uz) * h);
+      } else {
+        const hs = v.def.flying ? v.def.radius : v.def.headR;
+        v.eyes.position.set(v.headWorld.x + hfx * hs * 0.9, v.headWorld.y + hs * 0.15, v.headWorld.z + hfz * hs * 0.9);
+      }
       (v.eyes.material as THREE.SpriteMaterial).opacity = 0.75 + Math.sin(now * 9 + v.id) * 0.25;
       v.horns.position.copy(v.headWorld);
       v.horns.rotation.y = v.yaw;
