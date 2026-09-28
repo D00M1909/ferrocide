@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ArenaRoom } from './ArenaRoom';
+import { mountStatus } from './status';
 
 const port = Number(process.env.PORT || 2567);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,9 +20,10 @@ const server = new Server({
     app.get('/health', (_req, res) => {
       res.json({ ok: true });
     });
+    mountStatus(app);
   },
 });
 
 server.define('arena', ArenaRoom);
 await server.listen(port);
-console.log(`[ferrocide] game server on :${port}${fs.existsSync(dist) ? ' (serving dist/)' : ''}`);
+console.log(`[ferrocide] game server on :${port}${fs.existsSync(dist) ? ' (serving dist/)' : ''} · live status: http://localhost:${port}/status`);

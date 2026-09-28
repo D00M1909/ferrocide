@@ -2,6 +2,7 @@ import { Room, type Client } from 'colyseus';
 import { MAX_PLAYERS, SERVER_TICK } from '../shared/constants';
 import type { WelcomeMsg } from '../shared/protocol';
 import { GameSim } from '../shared/sim';
+import { logLine, rooms } from './status';
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const usedCodes = new Set<string>();
@@ -28,6 +29,7 @@ export class ArenaRoom extends Room {
   override maxMessagesPerSecond = 150;
   private sim = new GameSim();
   private hostId = '';
+  private created = Date.now();
 
   override onCreate(): void {
     this.roomId = makeCode();
@@ -51,6 +53,11 @@ export class ArenaRoom extends Room {
     });
     this.onMessage('hello', (c: Client) => this.welcome(c));
     this.onMessage('ping', (c: Client, t: unknown) => c.send('pong', Number(t) || 0));
+    rooms.set(this.roomId, () => ({
+      code: this.roomId, wave: this.sim.wave, phase: this.sim.phase, created: this.created,
+      players: [...this.sim.players.values()].map((p) => ({ name: p.name, connected: p.connected, alive: p.alive })),
+    }));
+    logLine(`room ${this.roomId} opened`);
   }
 
   override onUncaughtException(error: unknown, method: string): void {
@@ -62,6 +69,7 @@ export class ArenaRoom extends Room {
     const name = String(options?.name || 'SLAYER').replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 14).toUpperCase() || 'SLAYER';
     if (!this.hostId) this.hostId = client.sessionId;
     this.sim.addPlayer(client.sessionId, name);
+    logLine(`${name} joined room ${this.roomId} (${this.clients.length}/${MAX_PLAYERS})`);
   }
 
   override onDrop(client: Client): void {
@@ -75,6 +83,7 @@ export class ArenaRoom extends Room {
   }
 
   override onLeave(client: Client): void {
+    logLine(`${this.sim.players.get(client.sessionId)?.name ?? 'player'} left room ${this.roomId}`);
     this.sim.removePlayer(client.sessionId);
     if (client.sessionId === this.hostId) {
       const next = this.sim.players.keys().next();
@@ -85,6 +94,8 @@ export class ArenaRoom extends Room {
 
   override onDispose(): void {
     usedCodes.delete(this.roomId);
+    rooms.delete(this.roomId);
+    logLine(`room ${this.roomId} closed`);
   }
 
   private welcome(client: Client): void {

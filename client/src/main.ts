@@ -87,6 +87,7 @@ async function boot(): Promise<void> {
   // co-op: tell the server we left on purpose so the partner isn't kept waiting 20 s
   window.addEventListener('pagehide', () => game.link?.leave());
   game.startLoop();
+  startPresence();
   document.addEventListener('pointerlockchange', () => {
     if (!game || game.mode !== 'play' || botMode) return;
     if (document.pointerLockElement === canvas) {
@@ -106,6 +107,23 @@ async function boot(): Promise<void> {
   else if (auto === 'host') void startOnline('host');
   else if (auto === 'join') void startOnline('join', params.get('code') ?? '');
   else mainMenu();
+}
+
+/** Heartbeat to the game server's /status page (the only way it sees solo players). */
+function startPresence(): void {
+  if (location.port === '5173' || botMode) return; // dev server: no status page there
+  const id = Math.random().toString(36).slice(2, 12);
+  const send = (bye = false) => {
+    const body = JSON.stringify({
+      id, bye, name: settings.name, wave: game.wave, phase: game.phase,
+      mode: game.mode === 'menu' ? 'menu' : game.link?.online ? 'co-op' : 'solo',
+    });
+    if (bye) navigator.sendBeacon?.('/presence', new Blob([body], { type: 'application/json' }));
+    else void fetch('/presence', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => undefined);
+  };
+  send();
+  setInterval(() => send(), 10_000);
+  window.addEventListener('pagehide', () => send(true));
 }
 
 // ------------------------------------------------------------------ menus
