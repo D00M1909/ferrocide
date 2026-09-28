@@ -84,6 +84,7 @@ export interface Snapshot {
   phase: Phase;
   left: number; // enemies remaining in wave
   timer: number; // phase timer (intermission countdown)
+  pk: number; // bitmask of health pickups currently available (index into HEALTH_PICKUPS)
 }
 
 export type Phase = 'lobby' | 'intermission' | 'combat' | 'over' | 'victory';
@@ -110,6 +111,7 @@ export type GameEvent =
   | { t: 'kill'; id: number; k: EnemyKind; by: string; how: string; p: V; hs: boolean }
   | { t: 'phurt'; pid: string; d: number; hp: number; hard: number; src: HurtSource }
   | { t: 'heal'; pid: string; hp: number; amt: number; hard: number }
+  | { t: 'pickup'; i: number; pid: string }
   | { t: 'pdie'; pid: string }
   | { t: 'prespawn'; pid: string; p: V }
   | { t: 'wave'; n: number; total: number; title: string; boss: boolean }

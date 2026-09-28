@@ -1,7 +1,7 @@
 // Builds the visible arena from the shared collision boxes, plus lighting,
 // molten slag, jump pads, sky, and set dressing (chains, braziers, pipes).
 import * as THREE from 'three';
-import { ARENA_HALF, BOXES, JUMP_PADS, LAVA, WALL_HEIGHT, type Box, type Surface } from '../../../shared/arena';
+import { ARENA_HALF, BOXES, HEALTH_PICKUPS, JUMP_PADS, LAVA, WALL_HEIGHT, type Box, type Surface } from '../../../shared/arena';
 import { psxUniforms, psxify, Textures } from '../engine/psx';
 import { sprite } from '../engine/assets';
 
@@ -28,6 +28,7 @@ export class World {
   readonly scene = new THREE.Scene();
   private lavaMat: THREE.MeshBasicMaterial;
   private padRings: THREE.Mesh[] = [];
+  private pickups: { core: THREE.Object3D; light: THREE.PointLight; glow: THREE.Sprite; baseY: number; on: boolean; pop: number }[] = [];
   private embers: THREE.Points;
   private emberVel: Float32Array;
   private flames: THREE.Sprite[] = [];
@@ -119,6 +120,39 @@ export class World {
       ring.position.set(p.pos.x, p.pos.y + 0.14, p.pos.z);
       s.add(ring);
       this.padRings.push(ring);
+    }
+
+    // ------------------------------------------------------------ health pickups
+    // a floating blood crystal over a dark plate; the plate stays when the crystal is taken
+    // so players learn where they respawn
+    const glowTex = sprite('light_01');
+    for (const h of HEALTH_PICKUPS) {
+      const size = h.large ? 0.5 : 0.36;
+      const plate = new THREE.Mesh(new THREE.CylinderGeometry(size * 2.2, size * 2.5, 0.1, 8), psxify(new THREE.MeshLambertMaterial({ color: 0x241c1c, emissive: 0x2a0406 })));
+      plate.position.set(h.pos.x, h.pos.y + 0.05, h.pos.z);
+      s.add(plate);
+      const core = new THREE.Group();
+      const crystal = new THREE.Mesh(
+        new THREE.OctahedronGeometry(size).scale(1, 1.5, 1),
+        psxify(new THREE.MeshLambertMaterial({ color: 0xff2020, emissive: 0xb00010 })),
+      );
+      core.add(crystal);
+      if (h.large) {
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(size * 1.7, 0.035, 4, 12), new THREE.MeshBasicMaterial({ color: 0xffd0c0 }));
+        ring.rotation.x = Math.PI / 2;
+        core.add(ring);
+      }
+      const baseY = h.pos.y + 1.0;
+      core.position.set(h.pos.x, baseY, h.pos.z);
+      s.add(core);
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xff3030, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+      glow.scale.setScalar(size * 6);
+      glow.position.copy(core.position);
+      s.add(glow);
+      const light = new THREE.PointLight(0xff2a2a, h.large ? 8 : 5, 6, 1.5);
+      light.position.copy(core.position);
+      s.add(light);
+      this.pickups.push({ core, light, glow, baseY, on: true, pop: 0 });
     }
 
     // ------------------------------------------------------------ sky dome
@@ -235,8 +269,29 @@ export class World {
     }
   }
 
+  /** Show/hide pickups from the server's availability bitmask. */
+  setPickups(mask: number): void {
+    this.pickups.forEach((p, i) => {
+      const on = (mask & (1 << i)) !== 0;
+      if (on && !p.on) p.pop = 1; // respawned: grow back in
+      p.on = on;
+      p.core.visible = p.glow.visible = on;
+      p.light.visible = on;
+    });
+  }
+
   update(dt: number, time: number): void {
     psxUniforms.uTime.value = time;
+    for (let i = 0; i < this.pickups.length; i++) {
+      const p = this.pickups[i];
+      if (!p.on) continue;
+      p.pop = Math.max(0, p.pop - dt * 3);
+      p.core.rotation.y = time * 1.8 + i;
+      p.core.position.y = p.baseY + Math.sin(time * 2.2 + i) * 0.12;
+      p.core.scale.setScalar(1 - p.pop);
+      p.glow.position.y = p.core.position.y;
+      (p.glow.material as THREE.SpriteMaterial).opacity = 0.55 + Math.sin(time * 4 + i) * 0.2;
+    }
     if (this.lavaMat.map) {
       this.lavaMat.map.offset.x = time * 0.03;
       this.lavaMat.map.offset.y = Math.sin(time * 0.4) * 0.05;

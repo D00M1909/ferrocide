@@ -93,6 +93,16 @@ export const LAVA: Zone[] = [
   { min: { x: 23, y: -1, z: -5 }, max: { x: 31, y: 0.2, z: 5 } },
 ];
 
+/** Health pickup spots (pos = floor under the pickup). Small ones in the open ground ring,
+ *  large ones on the four mid-wall catwalks. */
+export const HEALTH_PICKUPS: { pos: Vec3; large: boolean }[] = [
+  ...[[1, 1], [1, -1], [-1, 1], [-1, -1]].map(([sx, sz]) => ({ pos: { x: 11 * sx, y: 0, z: 11 * sz }, large: false })),
+  { pos: { x: 0, y: 3.6, z: 34 }, large: true },
+  { pos: { x: 0, y: 3.6, z: -34 }, large: true },
+  { pos: { x: 34, y: 3.6, z: 0 }, large: true },
+  { pos: { x: -34, y: 3.6, z: 0 }, large: true },
+];
+
 export const PLAYER_SPAWNS: Vec3[] = [
   { x: -2.5, y: 1.2, z: 3 },
   { x: 2.5, y: 1.2, z: 3 },

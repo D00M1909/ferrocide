@@ -96,6 +96,14 @@ export const WEAPONS = {
   },
 } as const;
 
+/** Health pickups: an option for players who fight at range and can't blood-heal. */
+export const HEALTH_PICKUP = {
+  radius: 1.4, // horizontal grab distance from the pickup's centre
+  small: { heal: 25, respawn: 20 },
+  // big ones sit on the wall catwalks (reached by wall-jumping) and also burn off hard damage
+  large: { heal: 60, respawn: 40 },
+};
+
 export const PUNCH = {
   damage: 22,
   interval: 0.42,

@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { ENEMIES, PLAYER, PLAYER_SEND_RATE, SLAM, WEAPON_ORDER } from '../../../shared/constants';
 import { Motor, type MoveInput } from '../../../shared/movement';
-import { blockedAt } from '../../../shared/arena';
+import { HEALTH_PICKUPS, blockedAt } from '../../../shared/arena';
 import { PF, type GameEvent, type HitKind, type Phase, type PlayerStats, type Snapshot, type V } from '../../../shared/protocol';
 import { WAVES } from '../../../shared/waves';
 import { sprite } from '../engine/assets';
@@ -215,6 +215,7 @@ export class Game {
     const now = performance.now() / 1000;
     this.snaps.push(s, this.netNow());
     this.hazards.applySnapshot(s, now);
+    this.world.setPickups(s.pk ?? -1);
     if (s.phase !== this.phase) {
       this.phase = s.phase;
       this.onPhase?.(s.phase);
@@ -313,6 +314,16 @@ export class Game {
         case 'prespawn':
           if (e.pid === me) this.onRespawn({ x: e.p[0], y: e.p[1], z: e.p[2] });
           break;
+        case 'pickup': {
+          const h = HEALTH_PICKUPS[e.i];
+          if (!h) break;
+          const at = { x: h.pos.x, y: h.pos.y + 1, z: h.pos.z };
+          this.fx.sparks(at, h.large ? 24 : 14, 5, COLORS.bloodBright, 0.1);
+          this.fx.glow(at, h.large ? 3 : 2, COLORS.red, 0.2);
+          this.audio.play('forcefield', { at, volume: 0.35, pitch: h.large ? 1.1 : 1.5, dur: 0.4 });
+          if (e.pid === me) this.audio.synth('heal', h.large ? 1 : 0.7);
+          break;
+        }
         case 'revive':
           if (e.pid === me) this.hud.showBanner('REVIVED', `${this.names.get(e.by) ?? 'PARTNER'} DRAGGED YOU BACK`, 2);
           else if (e.by === me) { this.hud.showBanner('PARTNER REVIVED', '', 1.6); this.style.add('SECOND WIND', 120, true); }

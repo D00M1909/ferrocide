@@ -4,10 +4,10 @@
 // both players must agree on (enemies, damage, waves) is decided here, and every
 // client claim is validated and capped before it touches the world.
 import {
-  AIR_SPAWNS, GROUND_SPAWNS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, blockedAt, inZone, lineOfSight, moveBody, raycastWorld,
+  AIR_SPAWNS, GROUND_SPAWNS, HEALTH_PICKUPS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, blockedAt, inZone, lineOfSight, moveBody, raycastWorld,
 } from './arena';
 import {
-  ENEMIES, ENEMY_ATTACKS, PLAYER, PROJECTILES, PUNCH, SLAM, WEAPONS, type EnemyKind, type ProjectileKind,
+  ENEMIES, ENEMY_ATTACKS, HEALTH_PICKUP, PLAYER, PROJECTILES, PUNCH, SLAM, WEAPONS, type EnemyKind, type ProjectileKind,
 } from './constants';
 import { angleDiff, clamp, dist, distXZ, rng, type Vec3 } from './math';
 import {
@@ -168,6 +168,7 @@ export class GameSim {
   private rand: () => number;
   private runStart = 0;
   private waveLeft = 0;
+  private pickupAt = HEALTH_PICKUPS.map(() => 0); // time each pickup is next available
 
   constructor(seed = Date.now()) {
     this.rand = rng(seed);
@@ -402,6 +403,7 @@ export class GameSim {
       p.alive = true;
       this.emit({ t: 'prespawn', pid: p.id, p: vv(sp) });
     }
+    this.pickupAt.fill(0);
     this.emit({ t: 'reset', wave: this.wave });
     this.beginIntermission(this.wave, 3);
   }
@@ -435,8 +437,30 @@ export class GameSim {
       }
       if (!p.alive && this.phase !== 'over' && this.phase !== 'victory' && this.time >= p.respawnAt && p.respawnAt > 0) this.respawn(p);
     }
+    this.updatePickups();
     for (const e of this.enemies.values()) this.updateEnemy(e, dt);
     for (const pr of this.projectiles.values()) this.updateProjectile(pr, dt);
+  }
+
+  /** Walk over a health pickup to take it; it's left alone if you're already full. */
+  private updatePickups(): void {
+    for (let i = 0; i < HEALTH_PICKUPS.length; i++) {
+      if (this.time < this.pickupAt[i]) continue;
+      const spot = HEALTH_PICKUPS[i];
+      const def = spot.large ? HEALTH_PICKUP.large : HEALTH_PICKUP.small;
+      for (const p of this.players.values()) {
+        if (!p.alive || !p.connected || p.hp >= PLAYER.maxHealth) continue;
+        if (distXZ(p.pos, spot.pos) > HEALTH_PICKUP.radius || p.pos.y < spot.pos.y - 0.5 || p.pos.y > spot.pos.y + 2) continue;
+        // pickups restore hard damage too (small ones only as much as they heal)
+        p.hard = Math.max(0, p.hard - (spot.large ? PLAYER.maxHealth : def.heal));
+        const before = p.hp;
+        p.hp = Math.min(PLAYER.maxHealth - p.hard, p.hp + def.heal);
+        this.pickupAt[i] = this.time + def.respawn;
+        this.emit({ t: 'pickup', i, pid: p.id });
+        this.emit({ t: 'heal', pid: p.id, hp: r2(p.hp), amt: r2(p.hp - before), hard: r2(p.hard) });
+        break;
+      }
+    }
   }
 
   drainEvents(): GameEvent[] {
@@ -455,7 +479,13 @@ export class GameSim {
     const pl = [...this.players.values()].map(
       (p) => [p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.vel.x), r2(p.vel.y), r2(p.vel.z), r2(p.yaw), r2(p.pitch), p.flags, p.weapon, Math.ceil(p.hp), p.alive ? 1 : 0, Math.floor(p.hard), p.connected ? 1 : 0, r2(p.revive / REVIVE_TIME), r2(p.deathPos.x), r2(p.deathPos.y), r2(p.deathPos.z)] as PlayerSnap,
     );
-    return { t: r2(this.time), e, pr, pl, wave: this.wave, phase: this.phase, left: this.waveLeft, timer: r2(this.phaseTimer) };
+    return { t: r2(this.time), e, pr, pl, wave: this.wave, phase: this.phase, left: this.waveLeft, timer: r2(this.phaseTimer), pk: this.pickupMask() };
+  }
+
+  private pickupMask(): number {
+    let m = 0;
+    for (let i = 0; i < this.pickupAt.length; i++) if (this.time >= this.pickupAt[i]) m |= 1 << i;
+    return m;
   }
 
   // -------------------------------------------------------------------- waves
