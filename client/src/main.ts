@@ -20,6 +20,8 @@ const settings: Settings = loadSettings();
 if (params.get('name')) settings.name = params.get('name')!.toUpperCase();
 if (params.get('res')) settings.resolution = Number(params.get('res'));
 const botMode = params.get('bot') === '1';
+/** Run mode is unfinished: only offered on local builds or with ?runs=1, hidden on the public site. */
+const runsEnabled = ['localhost', '127.0.0.1'].includes(location.hostname) || params.get('runs') === '1';
 
 const audio = new Audio();
 if (params.get('mute') === '1') settings.master = 0;
@@ -106,7 +108,7 @@ async function boot(): Promise<void> {
     if (game.mode === 'play' && !botMode && !screen && !pauseEl && !clickGate && document.pointerLockElement !== canvas) input.requestLock();
   });
   const auto = params.get('autostart');
-  if (auto === 'solo') startSolo(params.get('mode') === 'run' ? 'run' : 'classic');
+  if (auto === 'solo') startSolo(runsEnabled && params.get('mode') === 'run' ? 'run' : 'classic');
   else if (auto === 'host') void startOnline('host');
   else if (auto === 'join') void startOnline('join', params.get('code') ?? '');
   else mainMenu();
@@ -143,13 +145,14 @@ function mainMenu(error = ''): void {
         <div class="section-label">CALLSIGN</div>
         <input type="text" id="name" maxlength="14" placeholder="SLAYER" value="${esc(settings.name)}" />
         <div class="section-label">DEPLOY</div>
-        <button class="primary" id="run">START A RUN <small>SOLO · ROGUELIKE</small></button>
-        <button id="solo">CLASSIC <small>SOLO · 8 WAVES</small></button>
+        ${runsEnabled
+          ? '<button class="primary" id="run">START A RUN <small>SOLO · ROGUELIKE</small></button><button id="solo">CLASSIC <small>SOLO · 8 WAVES</small></button>'
+          : '<button class="primary" id="solo">PLAY SOLO</button>'}
         <button id="host">HOST CO-OP</button>
         <div class="row"><input type="text" id="code" maxlength="4" placeholder="CODE" style="width:118px" /><button id="join" style="flex:1">JOIN CO-OP</button></div>
         <div class="section-label">SYSTEM</div>
         <div class="row"><button id="settings" style="flex:1">SETTINGS</button><button id="controls" style="flex:1">CONTROLS</button></div>
-        ${bestLine()}
+        ${runsEnabled ? bestLine() : ''}
         <div class="err" id="err">${esc(error)}</div>
         ${game?.renderer.softwareRendering ? '<div class="err">HARDWARE ACCELERATION IS OFF: the game will run slowly. Turn on "Use graphics acceleration when available" in your browser settings, then restart the browser.</div>' : ''}
       </div>
@@ -160,13 +163,13 @@ function mainMenu(error = ''): void {
       <p><span class="k">PARRY <b>YELLOW</b>.</span> Punch (F) glowing orbs, bolts and mortars straight back, or punch a husk mid-swing.</p>
       <p><span class="k">STYLE PAYS.</span> Toss a coin, then shoot it. Shoot your own shotgun core. Rotate weapons: repeat kills score less.</p>
       <p><span class="k">RED CRYSTALS</span> restore health, but respawn slowly.</p>
-      <p><span class="k">RUNS.</span> Three layers of six rooms and a boss. Pick a gate after every room, forge upgrades that change your guns and movement, spend style on more.</p>
+      ${runsEnabled ? '<p><span class="k">RUNS.</span> Three layers of six rooms and a boss. Pick a gate after every room, forge upgrades that change your guns and movement, spend style on more.</p>' : ''}
     </div>
   `, 'menu-layout');
   show(el);
   const name = el.querySelector<HTMLInputElement>('#name')!;
   name.addEventListener('input', () => { settings.name = name.value.toUpperCase(); saveSettings(settings); });
-  el.querySelector('#run')!.addEventListener('click', () => { blip(); startSolo('run'); });
+  el.querySelector('#run')?.addEventListener('click', () => { blip(); startSolo('run'); });
   el.querySelector('#solo')!.addEventListener('click', () => { blip(); startSolo('classic'); });
   el.querySelector('#host')!.addEventListener('click', () => { blip(); void startOnline('host'); });
   const code = el.querySelector<HTMLInputElement>('#code')!;
@@ -197,12 +200,12 @@ function controlsScreen(back: () => void): void {
         <div><b>SLAGTHROWER</b> rockets</div><div>hold RMB to steer rockets to your crosshair · tap to airburst · rocket jump!</div>
         <div><b>PARRY</b> punch yellow orbs/mortars</div><div>press a beat early, it still counts · reflects them, heals ${50} HP</div>
       </div>
-      <h2 style="margin-top:18px">RUNS</h2>
+      ${runsEnabled ? `<h2 style="margin-top:18px">RUNS</h2>
       <div class="controls">
         <div><b>GATES</b> walk through one after a room</div><div>each shows what clearing the next room pays</div>
         <div><b>FORGE</b> one free pick per visit</div><div>buy more or reroll with style · 1-4 pick · ENTER leaves</div>
         <div><b>VARIANTS</b> new alt-fires for each gun</div><div>press the gun's number again to switch variant</div>
-      </div>
+      </div>` : ''}
       <div style="margin-top:18px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
@@ -272,7 +275,7 @@ function settingsScreen(back: () => void): void {
 
 let lobbyOpen = false;
 
-let lobbyMode: GameMode = 'run';
+let lobbyMode: GameMode = runsEnabled ? 'run' : 'classic';
 
 function startSolo(mode: GameMode): void {
   const link = new LocalLink(settings.name || 'SLAYER');
@@ -299,7 +302,7 @@ async function startOnline(mode: 'host' | 'join', code = ''): Promise<void> {
         <div class="hint wake-blocked" style="display:none">Taking a while? Ad blockers and browser VPNs often block the co-op server. Allow <b>onrender.com</b> for this site, then try again.</div>
         <div class="row"><button id="wake-cancel">CANCEL</button><button id="wake-solo" class="primary">PLAY SOLO INSTEAD</button></div>`);
       wake.querySelector('#wake-cancel')!.addEventListener('click', () => { blip(); cancelled = true; mainMenu(); });
-      wake.querySelector('#wake-solo')!.addEventListener('click', () => { blip(); cancelled = true; startSolo('run'); });
+      wake.querySelector('#wake-solo')!.addEventListener('click', () => { blip(); cancelled = true; startSolo(lobbyMode); });
       show(wake);
     }
     // the bar fills over ~90 s, then crawls, so it never sits "full" while we're still waiting
@@ -332,10 +335,10 @@ function lobby(link: NetLink): void {
       <label class="small">ROOM CODE — SHARE WITH YOUR PARTNER</label>
       <div class="code">${esc(link.code)}</div>
       <div class="hint" id="players"></div>
-      <div class="seg" id="mode">
+      ${runsEnabled ? `<div class="seg" id="mode">
         <button data-m="run">RUN</button><button data-m="classic">CLASSIC</button>
       </div>
-      <div class="hint" id="modehint"></div>
+      <div class="hint" id="modehint"></div>` : ''}
       <div style="display:flex;gap:8px;justify-content:center;margin-top:14px">
         <button id="start" class="primary">START</button>
         <button id="leave">LEAVE</button>
@@ -347,13 +350,13 @@ function lobby(link: NetLink): void {
   const start = el.querySelector<HTMLButtonElement>('#start')!;
   const wait = el.querySelector<HTMLElement>('#wait')!;
   const modeBtns = [...el.querySelectorAll<HTMLButtonElement>('#mode button')];
-  const modeHint = el.querySelector<HTMLElement>('#modehint')!;
+  const modeHint = el.querySelector<HTMLElement>('#modehint');
   const paintMode = () => {
     for (const b of modeBtns) {
       b.classList.toggle('on', b.dataset.m === lobbyMode);
       b.disabled = !link.isHost;
     }
-    modeHint.textContent = !link.isHost ? 'The host picks the mode.' : lobbyMode === 'run' ? 'Roguelike: gates, forges, three layers.' : 'The 8-wave arena.';
+    if (modeHint) modeHint.textContent = !link.isHost ? 'The host picks the mode.' : lobbyMode === 'run' ? 'Roguelike: gates, forges, three layers.' : 'The 8-wave arena.';
   };
   for (const b of modeBtns) b.addEventListener('click', () => { blip(); lobbyMode = b.dataset.m === 'classic' ? 'classic' : 'run'; paintMode(); });
   paintMode();
@@ -372,7 +375,7 @@ function lobby(link: NetLink): void {
   }, 250);
   start.addEventListener('click', () => { blip(); link.start(lobbyMode); });
   el.querySelector('#leave')!.addEventListener('click', () => { blip(); lobbyOpen = false; clearInterval(timer); game.end(); mainMenu(); });
-  if (botMode && link.isHost && params.get('autostart') === 'host') setTimeout(() => link.start(params.get('mode') === 'run' ? 'run' : 'classic'), Number(params.get('startDelay') ?? 4000));
+  if (botMode && link.isHost && params.get('autostart') === 'host') setTimeout(() => link.start(runsEnabled && params.get('mode') === 'run' ? 'run' : 'classic'), Number(params.get('startDelay') ?? 4000));
 }
 
 function onPhase(p: Phase): void {
