@@ -228,6 +228,8 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
   });
   inner.updateMatrixWorld(true);
   inner.quaternion.premultiply(gunOrientation(inner));
+  const fix = GUN_FIX[name];
+  if (fix) inner.quaternion.premultiply(new THREE.Quaternion().setFromEuler(fix));
   inner.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(inner);
   const size = box.getSize(new THREE.Vector3());
@@ -239,6 +241,13 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
   holder.add(inner);
   return holder;
 }
+
+// The auto-orientation guesses wrong on these (checked by rendering each gun side-on):
+// the revolver came out grip-up, the launcher grip-up with its rocket noses facing the player.
+const GUN_FIX: Partial<Record<ModelName, THREE.Euler>> = {
+  revolver_a: new THREE.Euler(0, 0, Math.PI),
+  rocket_launcher: new THREE.Euler(Math.PI, 0, 0),
+};
 
 let gunTex: THREE.Texture | null = null;
 function gunTexture(): THREE.Texture {
