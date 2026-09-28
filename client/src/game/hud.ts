@@ -1,6 +1,8 @@
 // DOM heads-up display. Everything is created once and mutated per frame;
 // list-like widgets (style feed, killfeed) only touch the DOM when entries change.
 import { PLAYER, RANKS, WEAPONS, WEAPON_ORDER, type WeaponId } from '../../../shared/constants';
+import type { RunSnap } from '../../../shared/protocol';
+import { CHALLENGE_INFO, REWARD_INFO, RUN, isBossDepth, layerOf, roomOf } from '../../../shared/run';
 import type { StyleMeter } from './style';
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] => {
@@ -22,6 +24,12 @@ export class HUD {
   private slots: HTMLElement[] = [];
   private fresh: HTMLElement[] = [];
   private altInfo = el('div', 'alt');
+  private variantName = el('div', 'variant');
+  private impact = el('div', 'impact');
+  private bankEl = el('div', 'bank');
+  private toastEl = el('div', 'hud-toast');
+  private toastT = 0;
+  private trial = el('div', 'trial');
   private rank = el('div', 'rank');
   private rankNum = el('div', 'rank-num');
   private styleFill = el('i');
@@ -31,6 +39,7 @@ export class HUD {
   private waveLeft = el('div', 'left');
   private boss = el('div', 'boss-bar');
   private bossFill = el('i');
+  private bossName = el('div', 'name', 'THE FOUNDRY COLOSSUS');
   private banner = el('div', 'banner');
   private bannerMain = el('span');
   private bannerSub = el('small');
@@ -86,21 +95,21 @@ export class HUD {
       this.fresh.push(f);
     });
     wb.append(slots, this.weapon);
-    bl.append(this.altInfo, wb, stam, hpRow);
+    bl.append(this.impact, this.altInfo, this.variantName, wb, stam, hpRow);
     this.root.appendChild(bl);
 
     // right: style
     const sp = el('div', 'style-panel');
     const sb = el('div', 'style-bar');
     sb.appendChild(this.styleFill);
-    sp.append(this.rankNum, this.rank, sb, this.feed);
+    sp.append(this.bankEl, this.rankNum, this.rank, sb, this.feed);
     this.root.appendChild(sp);
 
     // top: wave
     const wi = el('div', 'wave-info');
-    wi.append(this.waveTitle, this.waveLeft);
+    wi.append(this.waveTitle, this.waveLeft, this.trial);
     this.root.appendChild(wi);
-    const bn = el('div', 'name', 'THE FOUNDRY COLOSSUS');
+    const bn = this.bossName;
     const bb = el('div', 'bar');
     bb.appendChild(this.bossFill);
     this.boss.append(bn, bb);
@@ -119,7 +128,7 @@ export class HUD {
       dd.appendChild(a);
       this.dmgArcs.push(a);
     }
-    this.root.append(dd, this.net, this.fps, this.killfeed);
+    this.root.append(dd, this.net, this.fps, this.killfeed, this.toastEl);
   }
 
   show(v: boolean): void {
@@ -127,9 +136,10 @@ export class HUD {
   }
 
   update(dt: number, s: {
-    hp: number; hard: number; stamina: number; weapon: WeaponId; coins: number; coreCd: number; style: StyleMeter;
+    hp: number; hard: number; stamina: number; weapon: WeaponId; alt: string; variant: string; impact: number; style: StyleMeter;
     wave: number; waves: number; title: string; left: number; phase: string; timer: number;
     boss: { hp: number; max: number } | null; ping: number; online: boolean; fps: number | null;
+    run: RunSnap | null; bank: number;
   }): void {
     // health: bright = current, dark red = hard damage (not healable yet), white = recent loss
     const hp = Math.max(0, s.hp);
@@ -153,9 +163,17 @@ export class HUD {
       this.fresh[i].style.transform = `scaleX(${(f - 0.5) / 1})`;
       this.fresh[i].classList.toggle('stale', f < 0.9);
     });
-    if (s.weapon === 'revolver') this.altInfo.textContent = `COINS ${'●'.repeat(s.coins)}${'○'.repeat(WEAPONS.revolver.coinCharges - s.coins)}`;
-    else if (s.weapon === 'shotgun') this.altInfo.textContent = s.coreCd > 0 ? `CORE ${s.coreCd.toFixed(1)}s` : 'CORE READY';
-    else this.altInfo.textContent = 'ALT: TAP BURST · HOLD STEER';
+    this.altInfo.textContent = s.alt;
+    this.variantName.textContent = s.variant;
+    this.impact.style.display = s.impact >= 0 ? '' : 'none';
+    if (s.impact >= 0) {
+      this.impact.textContent = `IMPACT ${'▮'.repeat(s.impact + 1)}${'▯'.repeat(2 - s.impact)} ${['LOW', 'MEDIUM', 'HIGH'][s.impact]}`;
+      this.impact.className = `impact tier${s.impact}`;
+    }
+    this.bankEl.style.display = s.run ? '' : 'none';
+    if (s.run) this.bankEl.textContent = `◆ ${s.bank.toLocaleString('en-US')} STYLE`;
+    this.toastT = Math.max(0, this.toastT - dt);
+    this.toastEl.style.opacity = this.toastT > 0 ? String(Math.min(1, this.toastT * 3)) : '0';
 
     // style
     const r = s.style.rank;
@@ -175,8 +193,18 @@ export class HUD {
     }
     this.syncFeed(s.style);
 
-    // wave
-    if (s.phase === 'lobby' || s.wave <= 0) {
+    // wave (classic) or room (run)
+    this.trial.textContent = s.run?.tl !== undefined ? `TIME TRIAL ${Math.ceil(s.run.tl)}s` : '';
+    this.trial.classList.toggle('urgent', (s.run?.tl ?? 99) < 10);
+    if (s.run && s.run.d > 0) {
+      const d = s.run.d;
+      const layer = RUN.layers[layerOf(d)].name;
+      const room = isBossDepth(d) ? 'BOSS' : `ROOM ${roomOf(d)}/${RUN.roomsPerLayer}`;
+      const tags = [s.run.ch ? CHALLENGE_INFO[s.run.ch].name : '', s.run.prize && s.phase !== 'choice' && s.phase !== 'forge' ? `PRIZE: ${REWARD_INFO[s.run.prize].name}` : ''].filter(Boolean).join(' · ');
+      this.waveTitle.textContent = `${layer} · ${room}${tags ? ` · ${tags}` : ''}`;
+      this.waveLeft.textContent = s.phase === 'combat' ? `${s.left} HOSTILES REMAIN` : s.phase === 'intermission' ? `INCOMING IN ${Math.ceil(s.timer)}`
+        : s.phase === 'choice' ? 'CHOOSE A GATE' : s.phase === 'forge' ? `FORGE CLOSES IN ${Math.ceil(s.timer)}` : '';
+    } else if (s.phase === 'lobby' || s.wave <= 0) {
       this.waveTitle.textContent = '';
       this.waveLeft.textContent = '';
     } else {
@@ -184,6 +212,7 @@ export class HUD {
       this.waveLeft.textContent = s.phase === 'combat' ? `${s.left} HOSTILES REMAIN` : s.phase === 'intermission' ? `INCOMING IN ${Math.ceil(s.timer)}` : '';
     }
     this.boss.style.display = s.boss ? 'block' : 'none';
+    if (s.boss) this.bossName.textContent = s.run ? RUN.layers[layerOf(s.run.d)].boss : 'THE FOUNDRY COLOSSUS';
     if (s.boss) this.bossFill.style.transform = `scaleX(${Math.max(0, s.boss.hp / s.boss.max)})`;
 
     this.bannerT = Math.max(0, this.bannerT - dt);
@@ -225,6 +254,12 @@ export class HUD {
       void e.offsetWidth; // restart the animation
       e.classList.add('healed');
     }
+  }
+
+  /** A short line under the crosshair (variant swaps). */
+  toast(text: string): void {
+    this.toastEl.textContent = text;
+    this.toastT = 1.2;
   }
 
   showBanner(text: string, sub = '', time = 2.2): void {

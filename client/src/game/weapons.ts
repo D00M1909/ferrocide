@@ -4,7 +4,8 @@
 // what the player sees; the server applies the damage.
 import * as THREE from 'three';
 import { lineOfSight, raycastWorld } from '../../../shared/arena';
-import { PUNCH, WEAPONS, WEAPON_ORDER, type WeaponId } from '../../../shared/constants';
+import { PUNCH, VARIANTS, WEAPONS, WEAPON_ORDER, type WeaponId } from '../../../shared/constants';
+import { UPGRADE_BY_ID, variantsOf } from '../../../shared/upgrades';
 import { raySphere, type Vec3 } from '../../../shared/math';
 import type { FxMsg, HitKind, V } from '../../../shared/protocol';
 import { sprite, staticModel } from '../engine/assets';
@@ -38,8 +39,12 @@ export interface WeaponCtx {
 }
 
 interface Coin { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string }
-interface Core { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string; bounces: number }
-interface Rocket { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string; guided?: boolean; syncT?: number }
+interface Core { id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string; bounces: number; hot?: boolean }
+interface Rocket {
+  id: number; pos: THREE.Vector3; vel: THREE.Vector3; life: number; mesh: THREE.Object3D; local: boolean; owner: string; guided?: boolean; syncT?: number;
+  age: number; frozenVel?: THREE.Vector3; frozenAt?: number; cold?: boolean;
+}
+interface Bomblet { pos: THREE.Vector3; vel: THREE.Vector3; t: number; mesh: THREE.Object3D }
 
 const v3 = (p: Vec3): V => [Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100];
 
@@ -89,6 +94,25 @@ export class Weapons {
   private rocketMat = new THREE.MeshBasicMaterial({ color: 0x3a3230 });
   private recentKillWeapons: { w: WeaponId; t: number }[] = [];
   shotsFired = 0;
+  // ---- run upgrades
+  ups = new Set<string>();
+  private vIdx: Record<WeaponId, number> = { revolver: 0, shotgun: 0, launcher: 0 };
+  private chargeT = -1; // charge beam / spinshot: how long alt has been held
+  beamCd = 0;
+  spinCharges: number = VARIANTS.spin.charges;
+  private spinRegen = 0;
+  pumps = 0;
+  private pumpCd = 0;
+  private swingT = 0;
+  frozen = false;
+  freezeEnergy: number = VARIANTS.freeze.max;
+  private bomblets: Bomblet[] = [];
+  private bombletMat = new THREE.MeshBasicMaterial({ color: 0xffb040 });
+  private bombletGeo = new THREE.IcosahedronGeometry(0.1, 0);
+  /** Called with a banner line when the variant changes (HUD toast). */
+  onVariant: ((w: WeaponId, name: string) => void) | null = null;
+  /** Current horizontal+fall speed, for the hammer's impact tier. */
+  impactSpeed = 0;
 
   constructor(private world: THREE.Scene, private selfId: () => string) {
     this.vmCam = new THREE.PerspectiveCamera(62, 1, 0.01, 10);
@@ -187,8 +211,45 @@ export class Weapons {
     this.vmScene.add(this.arm);
   }
 
+  /** The variants this gun holds and which one is active. */
+  variantList(w: WeaponId): string[] {
+    return variantsOf([...this.ups], w);
+  }
+
+  variant(w: WeaponId = this.current): string {
+    const list = this.variantList(w);
+    return list[this.vIdx[w] % list.length];
+  }
+
+  get hammer(): boolean {
+    return this.ups.has('f_hammer');
+  }
+
+  /** Run upgrades changed: keep the active variant valid, drop state of variants we lost. */
+  setUpgrades(list: string[]): void {
+    this.ups = new Set(list);
+    for (const w of WEAPON_ORDER) this.vIdx[w] %= this.variantList(w).length;
+    if (!this.ups.has('v_freeze') && this.frozen) this.frozen = false;
+  }
+
+  private cycleVariant(w: WeaponId): void {
+    const list = this.variantList(w);
+    if (list.length < 2) return;
+    this.cancelAlt();
+    this.vIdx[w] = (this.vIdx[w] + 1) % list.length;
+    this.equipT = 0.2;
+    this.onVariant?.(w, UPGRADE_BY_ID.get(this.variant(w))?.name ?? '');
+  }
+
+  /** Drop any half-finished alt (charging, spinning, frozen rockets stay frozen). */
+  private cancelAlt(): void {
+    this.chargeT = -1;
+    this.altHeldT = -1;
+  }
+
   select(w: WeaponId, instant = false): void {
-    if (w === this.current && !instant) return;
+    if (w === this.current && !instant) { this.cycleVariant(w); return; }
+    this.cancelAlt();
     if (w !== this.current) this.last = this.current;
     this.current = w;
     this.switchT = instant ? 0 : 0.06;
@@ -218,6 +279,18 @@ export class Weapons {
     this.punchCd = Math.max(0, this.punchCd - dt);
     this.coreCd = Math.max(0, this.coreCd - dt);
     this.switchT = Math.max(0, this.switchT - dt);
+    this.beamCd = Math.max(0, this.beamCd - realDt);
+    this.pumpCd = Math.max(0, this.pumpCd - realDt);
+    this.swingT = Math.max(0, this.swingT - dt);
+    if (this.spinCharges < VARIANTS.spin.charges) {
+      this.spinRegen += dt;
+      if (this.spinRegen >= VARIANTS.spin.regen) { this.spinRegen = 0; this.spinCharges++; }
+    }
+    if (this.frozen) {
+      this.freezeEnergy -= realDt;
+      if (this.freezeEnergy <= 0) this.unfreeze(ctx);
+    } else this.freezeEnergy = Math.min(VARIANTS.freeze.max, this.freezeEnergy + VARIANTS.freeze.regen * realDt);
+    this.impactSpeed = Math.hypot(ctx.motor.vel.x, ctx.motor.vel.z) + Math.max(0, -ctx.motor.vel.y) * 0.5;
     if (this.coins < WEAPONS.revolver.coinCharges) {
       this.coinRegen += dt;
       if (this.coinRegen >= WEAPONS.revolver.coinRegen) { this.coinRegen = 0; this.coins++; }
@@ -239,7 +312,10 @@ export class Weapons {
       }
       if (this.switchT <= 0) {
         if (input.isDown('fire') && this.cooldowns[this.current] <= 0) this.fire(ctx);
-        if (this.current === 'launcher') this.launcherAlt(input, ctx, realDt);
+        const v = this.variant();
+        if (v === 'v_guide') this.launcherAlt(input, ctx, realDt);
+        else if (v === 'v_beam') this.beamAlt(input, ctx, realDt);
+        else if (v === 'v_ricochet') this.spinAlt(input, ctx, realDt);
         else if (input.wasPressed('alt')) this.alt(ctx);
       }
     }
@@ -247,6 +323,7 @@ export class Weapons {
     this.updateCoins(dt, ctx);
     this.updateCores(dt, ctx);
     this.updateRockets(dt, ctx);
+    this.updateBomblets(dt, ctx);
     this.animate(dt, ctx, mouse);
   }
 
@@ -269,10 +346,18 @@ export class Weapons {
       this.flash(0.035, 0.34);
       const to = this.hitscan(ctx, ctx.eye, ctx.fwd, WEAPONS.revolver.damage, 'revolver', WEAPONS.revolver.pierce, 0xfff0a0, 0.035);
       ctx.sendFx({ t: 'shot', w: 'revolver', from: v3(this.muzzleWorld(ctx)), to: [v3(to)] });
+    } else if (w === 'shotgun' && this.hammer) {
+      this.swing(ctx);
+    } else if (w === 'shotgun' && this.pumps >= 3) {
+      this.overpump(ctx, this.eyeFront(ctx, 1.4));
     } else if (w === 'shotgun') {
       const S = WEAPONS.shotgun;
+      const pumped = this.pumps;
+      const pellets = VARIANTS.pump.pellets[pumped] ?? S.pellets;
+      const spread = VARIANTS.pump.spread[pumped] ?? S.spread;
+      this.pumps = 0;
       this.cooldowns.shotgun = S.interval;
-      this.recoil = 1.6; this.recoilRot = 1.6;
+      this.recoil = 1.6 + pumped * 0.3; this.recoilRot = 1.6 + pumped * 0.3;
       this.pumpT = 0.5;
       ctx.fx.flashLight(this.muzzleWorld(ctx), 0xffb050, 6, 14, 0.08);
       ctx.audio.play('shotgun', { volume: 1, variance: 0.06, reverb: 0.4 });
@@ -282,17 +367,21 @@ export class Weapons {
       const agg = new Map<EnemyView, { dmg: number; head: boolean; point: Vec3 }>();
       const tos: V[] = [];
       const muzzle = this.muzzleWorld(ctx);
-      for (let i = 0; i < S.pellets; i++) {
-        const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * S.spread;
+      const pierce = this.ups.has('m_pierce');
+      for (let i = 0; i < pellets; i++) {
+        const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * spread;
         const d = ctx.fwd.clone().addScaledVector(ctx.right, Math.cos(a) * r).addScaledVector(ctx.up, Math.sin(a) * r).normalize();
         const res = this.traceFirst(ctx, ctx.eye, d, S.range);
         if (res.core) { this.detonateCore(res.core, ctx, true); continue; }
         if (res.enemy) {
-          const close = res.enemy.dist < S.closeRange ? S.closeMult : 1;
-          const cur = agg.get(res.enemy.view) ?? { dmg: 0, head: false, point: res.enemy.point };
-          cur.dmg += S.pelletDamage * close * (res.enemy.head ? 1.25 : 1);
-          cur.head = cur.head || res.enemy.head;
-          agg.set(res.enemy.view, cur);
+          const hits = pierce ? this.pelletPierce(ctx, d, S.range, res.enemy) : [res.enemy];
+          hits.forEach((h, k) => {
+            const close = h.dist < S.closeRange ? S.closeMult : 1;
+            const cur = agg.get(h.view) ?? { dmg: 0, head: false, point: h.point };
+            cur.dmg += S.pelletDamage * close * (h.head ? 1.25 : 1) * (k ? VARIANTS.pierce.second : 1);
+            cur.head = cur.head || h.head;
+            agg.set(h.view, cur);
+          });
         } else if (res.wall) {
           ctx.fx.sparks(res.end, 2, 5, COLORS.spark, 0.08);
           if (i % 3 === 0) ctx.fx.decal(res.end, res.wall.normal, 0.25, 'scorch');
@@ -306,6 +395,7 @@ export class Weapons {
       }
       // a point-blank blast lands with weight: a sliver of hit-stop and a harder kick
       if (big) { ctx.fx.freeze(0.04); ctx.fx.shake(0.4); }
+      if (pumped === 2 && big) ctx.style('PUMPED', 40);
       ctx.sendFx({ t: 'shot', w: 'shotgun', from: v3(muzzle), to: tos });
     } else {
       const L = WEAPONS.launcher;
@@ -342,6 +432,18 @@ export class Weapons {
       ctx.audio.play('coin', { volume: 0.7 });
       ctx.sendFx({ t: 'coin', id, p: v3(p), v: v3(vel) });
       this.punchT = Math.max(this.punchT, 0.12);
+    } else if (w === 'shotgun' && this.variant() === 'v_pump') {
+      if (this.pumpCd > 0) return;
+      if (this.pumps >= 3) { ctx.audio.synth('denied'); return; }
+      this.pumps++;
+      this.pumpCd = VARIANTS.pump.pumpTime;
+      this.pumpT = 0.42;
+      ctx.audio.play('pump', { volume: 0.6, pitch: 0.9 + this.pumps * 0.12 });
+      if (this.pumps === 3) { ctx.audio.synth('charge', 0.25); ctx.fx.shake(0.1); }
+    } else if (w === 'launcher' && this.variant() === 'v_freeze') {
+      if (this.frozen) this.unfreeze(ctx);
+      else if (this.freezeEnergy > 0.5) this.freeze(ctx);
+      else ctx.audio.synth('denied');
     } else if (w === 'shotgun') {
       if (this.coreCd > 0) { ctx.audio.synth('denied'); return; }
       const S = WEAPONS.shotgun;
@@ -415,6 +517,10 @@ export class Weapons {
       if (core.pos.distanceTo(ctx.eye) < PUNCH.range + 0.5) {
         core.vel.copy(ctx.fwd).multiplyScalar(45);
         core.life = Math.max(core.life, 1);
+        if (this.ups.has('m_hotcore')) {
+          core.hot = true;
+          (core.mesh.children[1] as THREE.Sprite | undefined)?.scale.setScalar(2.6);
+        }
         ctx.style('HOMERUN', 60);
       }
     }
@@ -532,13 +638,22 @@ export class Weapons {
     }
     // best enemy: prefer ones about to attack, then the closest
     let target: EnemyView | null = null, bestScore = -Infinity;
+    let second: EnemyView | null = null, secondScore = -Infinity;
     for (const v of ctx.enemies.views.values()) {
       if (v.dead || v.spawnT > 0.5) continue;
       const h = v.headPos();
       const d = h.distanceTo(coin.pos);
       if (d > 70 || !lineOfSight(coin.pos, h)) continue;
       const score = -d + (v.telegraphT > 0 ? 25 : 0) + (v.def.heavy ? 10 : 0);
-      if (score > bestScore) { bestScore = score; target = v; }
+      if (score > bestScore) { second = target; secondScore = bestScore; bestScore = score; target = v; }
+      else if (score > secondScore) { secondScore = score; second = v; }
+    }
+    if (target && second && this.ups.has('m_split')) {
+      const h2 = second.headPos();
+      ctx.fx.tracer(coin.pos, h2, 0xe0f0ff, 0.06, 0.3);
+      ctx.damage(second, dmg * WEAPONS.revolver.headshotMult * VARIANTS.split.second, 'ricoshot', true, h2, h2.clone().sub(coin.pos).normalize(), { rc: chain });
+      ctx.sendFx({ t: 'ricochet', pts: [v3(coin.pos), v3(h2)] });
+      ctx.style('SPLITSHOT', 60);
     }
     if (target) {
       const h = target.headPos();
@@ -629,11 +744,14 @@ export class Weapons {
   private detonateCore(c: Core, ctx: WeaponCtx, shot: boolean): void {
     this.removeCore(c);
     const S = WEAPONS.shotgun;
-    const r = shot ? S.coreShotRadius : S.coreRadius;
-    ctx.explode(c.pos, r, shot ? S.coreShotDamage : S.coreDamage, 'core', shot ? 20 : 14, S.coreSelfDamage);
+    let r: number = shot ? S.coreShotRadius : S.coreRadius;
+    let dmg: number = shot ? S.coreShotDamage : S.coreDamage;
+    if (c.hot) { r = VARIANTS.hotCore.radius; dmg = VARIANTS.hotCore.damage; }
+    ctx.explode(c.pos, r, dmg, 'core', shot || c.hot ? 20 : 14, S.coreSelfDamage);
     ctx.fx.explosion(c.pos, r * 0.8, COLORS.blue);
     ctx.sendFx({ t: 'coredie', id: c.id });
-    if (shot) { ctx.fx.freeze(0.06); ctx.style('CORE DETONATED', 60); }
+    if (c.hot) { ctx.fx.freeze(0.09); ctx.fx.shake(0.7); ctx.style('OVERCHARGED', 90, true); }
+    else if (shot) { ctx.fx.freeze(0.06); ctx.style('CORE DETONATED', 60); }
   }
 
   private updateCores(dt: number, ctx: WeaponCtx): void {
@@ -676,7 +794,7 @@ export class Weapons {
     mesh.position.set(p.x, p.y, p.z);
     mesh.lookAt(p.x + v.x, p.y + v.y, p.z + v.z);
     this.world.add(mesh);
-    this.rockets.push({ id, pos: new THREE.Vector3(p.x, p.y, p.z), vel: new THREE.Vector3(v.x, v.y, v.z), life: WEAPONS.launcher.rocketLife, mesh, local, owner });
+    this.rockets.push({ id, pos: new THREE.Vector3(p.x, p.y, p.z), vel: new THREE.Vector3(v.x, v.y, v.z), life: WEAPONS.launcher.rocketLife, mesh, local, owner, age: 0 });
   }
 
   private removeRocket(r: Rocket): void {
@@ -693,25 +811,37 @@ export class Weapons {
   private explodeRocket(r: Rocket, ctx: WeaponCtx, direct: EnemyView | null, radiusMul = 1): void {
     this.removeRocket(r);
     const L = WEAPONS.launcher;
+    const cold = r.cold ? VARIANTS.freeze.coldMult : 1;
     if (direct) {
-      ctx.damage(direct, L.directDamage, 'rocket', false, r.pos, r.vel.clone().normalize());
+      ctx.damage(direct, L.directDamage, 'rocket', false, r.pos, r.vel.lengthSq() > 0 ? r.vel.clone().normalize() : ctx.fwd);
       if (!ctx.motor.grounded) ctx.style('AIRSHOT', 60);
       if (r.guided) ctx.style('GUIDED', 50);
     }
-    ctx.explode(r.pos, L.splashRadius * radiusMul, L.splashDamage, 'rocket', L.selfKnockback, L.selfDamage);
-    ctx.fx.explosion(r.pos, L.splashRadius * 0.8 * radiusMul);
+    ctx.explode(r.pos, L.splashRadius * radiusMul * cold, L.splashDamage * cold, 'rocket', L.selfKnockback, L.selfDamage);
+    ctx.fx.explosion(r.pos, L.splashRadius * 0.8 * radiusMul * cold, r.cold ? COLORS.blue : COLORS.fire);
     ctx.sendFx({ t: 'rocketdie', id: r.id });
+    if (this.ups.has('m_cluster')) this.spawnBomblets(r.pos);
   }
 
   private updateRockets(dt: number, ctx: WeaponCtx): void {
     const aim = this.guiding && this.rockets.some((r) => r.local) ? this.aimPoint(ctx, 200) : null;
     for (const r of [...this.rockets]) {
-      r.life -= dt;
-      if (aim && r.local) this.steerRocket(r, aim, dt, ctx);
+      r.age += dt;
+      if (r.local && this.frozen && !r.frozenVel && r.age > 0.1) this.freezeRocket(r, ctx);
+      if (!r.frozenVel && r.vel.lengthSq() > 0) r.life -= dt; // frozen rockets (ours or the partner's) don't burn out
+      if (aim && r.local && !r.frozenVel) this.steerRocket(r, aim, dt, ctx);
       const step = r.vel.length() * dt;
       const dir = r.vel.clone().normalize();
       ctx.fx.fireTrail(r.pos, COLORS.fire, 0.35);
+      if (r.frozenVel) {
+        // a frozen rocket is a mine: anything walking into it sets it off
+        for (const v of ctx.enemies.views.values()) {
+          if (!v.dead && v.centre().distanceTo(r.pos) < v.def.radius + 0.6) { this.explodeRocket(r, ctx, v); break; }
+        }
+        continue;
+      }
       if (!r.local) {
+        if (step <= 0) continue;
         const w = raycastWorld(r.pos, dir, step);
         if (w || r.life <= 0) this.removeRocket(r);
         else { r.pos.addScaledVector(r.vel, dt); r.mesh.position.copy(r.pos); }
@@ -767,12 +897,278 @@ export class Weapons {
     }
   }
 
+  // ------------------------------------------------------------------ run variants
+
+  private eyeFront(ctx: WeaponCtx, d: number): THREE.Vector3 {
+    const wall = raycastWorld(ctx.eye, ctx.fwd, d);
+    return ctx.eye.clone().addScaledVector(ctx.fwd, wall ? Math.max(0.3, wall.dist - 0.3) : d);
+  }
+
+  /** Charge Beam: hold to charge, release to fire a beam that pierces everything. */
+  private beamAlt(input: Input, ctx: WeaponCtx, dt: number): void {
+    const B = VARIANTS.beam;
+    if (input.isDown('alt')) {
+      if (this.beamCd > 0) return;
+      if (this.chargeT < 0) { this.chargeT = 0; ctx.audio.synth('charge', 0.3); }
+      const before = this.chargeT;
+      this.chargeT += dt;
+      if (before < B.charge && this.chargeT >= B.charge) ctx.audio.synth('beep', 0.25);
+      if (this.ups.has('m_overcharge') && before < B.over && this.chargeT >= B.over) { ctx.audio.synth('charge', 0.35); ctx.fx.shake(0.1); }
+      // a small spark at the muzzle only: anything bigger fills the screen this close to the eye
+      if (Math.random() < 0.4) ctx.fx.glow(this.muzzleWorld(ctx), 0.07 + Math.min(1, this.chargeT / B.over) * 0.09, COLORS.blue, 0.05, 0.6);
+      return;
+    }
+    if (this.chargeT < 0) return;
+    const held = this.chargeT;
+    this.chargeT = -1;
+    if (held < B.charge) { ctx.audio.synth('denied'); return; }
+    this.fireBeam(ctx, this.ups.has('m_overcharge') && held >= B.over);
+  }
+
+  private fireBeam(ctx: WeaponCtx, over: boolean): void {
+    const B = VARIANTS.beam;
+    this.beamCd = B.cooldown;
+    this.recoil = 1.6; this.recoilRot = 1.8;
+    const o = ctx.eye, d = ctx.fwd;
+    const wall = raycastWorld(o, d, 300);
+    const limit = wall ? wall.dist : 300;
+    const hits = ctx.enemies.raycast(o, d, limit);
+    const dmg = over ? B.overDamage : B.damage;
+    for (const h of hits) ctx.damage(h.view, dmg * (h.head ? WEAPONS.revolver.headshotMult : 1), 'beam', h.head, h.point, d);
+    // cores caught in the beam go off too
+    for (const c of [...this.cores]) {
+      if (!c.local) continue;
+      const t = raySphere(o, d, c.pos, 0.9);
+      if (t >= 0 && t < limit) { this.detonateCore(c, ctx, true); ctx.style('CORE SNIPE', 80); }
+    }
+    const end = o.clone().addScaledVector(d, limit);
+    const muzzle = this.muzzleWorld(ctx);
+    ctx.fx.tracer(muzzle, end, over ? 0xc0f8ff : 0x70e8ff, over ? 0.26 : 0.14, over ? 0.45 : 0.3, () => this.muzzleWorld(ctx));
+    ctx.fx.flashLight(muzzle, 0x60d0ff, over ? 8 : 5, 16, 0.12);
+    if (wall) { ctx.fx.sparks(end, 20, 9, COLORS.blue, 0.12); ctx.fx.decal(end, wall.normal, over ? 0.9 : 0.5, 'scorch'); }
+    ctx.audio.play('laser_large', { volume: over ? 0.9 : 0.7, pitch: over ? 1.2 : 1.6, reverb: 0.3 });
+    ctx.audio.synth('thump', over ? 1 : 0.7);
+    ctx.fx.shake(over ? 0.5 : 0.25);
+    if (over) ctx.fx.freeze(0.05);
+    this.flash(0.06, over ? 1 : 0.7);
+    if (hits.length >= 2) ctx.style(`PIERCED x${hits.length}`, 45 * hits.length, hits.length >= 3);
+    ctx.sendFx({ t: 'shot', w: 'beam', from: v3(muzzle), to: [v3(end)] });
+  }
+
+  /** Spinshot: hold to spin up (more bounces the longer), release to fire. */
+  private spinAlt(input: Input, ctx: WeaponCtx, dt: number): void {
+    const S = VARIANTS.spin;
+    if (input.isDown('alt')) {
+      if (this.spinCharges <= 0) { if (input.wasPressed('alt')) ctx.audio.synth('denied'); return; }
+      if (this.chargeT < 0) this.chargeT = 0;
+      const before = this.chargeT;
+      this.chargeT += dt;
+      for (const t of S.times) if (before < t && this.chargeT >= t) ctx.audio.play('coin', { volume: 0.35, pitch: 0.8 + S.times.indexOf(t) * 0.25 });
+      return;
+    }
+    if (this.chargeT < 0) return;
+    const bounces = S.times.filter((t) => this.chargeT >= t).length;
+    this.chargeT = -1;
+    this.spinCharges--;
+    this.fireSpin(ctx, bounces);
+  }
+
+  private fireSpin(ctx: WeaponCtx, bounces: number): void {
+    const S = VARIANTS.spin;
+    this.recoil = 1.2; this.recoilRot = 1.4; this.spin += Math.PI;
+    let o = ctx.eye.clone();
+    let d = ctx.fwd.clone();
+    let dmg = S.damage;
+    const muzzle = this.muzzleWorld(ctx);
+    const pts: THREE.Vector3[] = [muzzle];
+    let total = 0;
+    const hitViews = new Set<EnemyView>();
+    for (let seg = 0; seg <= bounces; seg++) {
+      const wall = raycastWorld(o, d, 300);
+      const limit = wall ? wall.dist : 300;
+      const hits = ctx.enemies.raycast(o, d, limit).filter((h) => !hitViews.has(h.view)).slice(0, S.pierce);
+      for (const h of hits) {
+        hitViews.add(h.view);
+        ctx.damage(h.view, dmg * (h.head ? WEAPONS.revolver.headshotMult : 1), 'spin', h.head, h.point, d);
+        total++;
+      }
+      const end = o.clone().addScaledVector(d, limit);
+      pts.push(end);
+      if (!wall || seg === bounces) break;
+      ctx.fx.sparks(end, 10, 6, COLORS.spark, 0.1);
+      ctx.audio.play('ricochet', { at: end, volume: 0.6, pitch: 1.2 + seg * 0.15, dur: 0.5 });
+      const n = new THREE.Vector3(wall.normal.x, wall.normal.y, wall.normal.z);
+      d = d.clone().reflect(n).normalize();
+      o = end.clone().addScaledVector(n, 0.05);
+      dmg *= S.bounceMult;
+      if (this.ups.has('m_headhunter')) {
+        let best: THREE.Vector3 | null = null, bd = Infinity;
+        for (const v of ctx.enemies.views.values()) {
+          if (v.dead || hitViews.has(v)) continue;
+          const h = v.headPos();
+          const to = h.clone().sub(o);
+          const l = to.length();
+          if (l > 80 || to.normalize().dot(d) < Math.cos(S.homeCone) || !lineOfSight(o, h)) continue;
+          if (l < bd) { bd = l; best = h; }
+        }
+        if (best) d = best.sub(o).normalize();
+      }
+    }
+    for (let i = 0; i + 1 < pts.length; i++) ctx.fx.tracer(pts[i], pts[i + 1], 0xff7050, i === 0 ? 0.03 : 0.06, 0.25, i === 0 ? () => this.muzzleWorld(ctx) : null);
+    ctx.audio.play('revolver', { volume: 0.85, pitch: 0.8, reverb: 0.3 });
+    ctx.audio.synth('thump', 0.6);
+    ctx.fx.shake(0.15);
+    this.flash(0.04, 0.45);
+    if (bounces > 0 && total > 0) ctx.style(bounces >= 3 ? 'TRICKSHOT' : 'BANKSHOT', 40 + bounces * 30, bounces >= 3);
+    ctx.sendFx({ t: 'ricochet', pts: pts.map(v3) });
+  }
+
+  /** Third pump: the shell blows up in the barrel, point-blank. */
+  private overpump(ctx: WeaponCtx, at: THREE.Vector3): void {
+    const P = VARIANTS.pump;
+    const valve = this.ups.has('m_valve');
+    this.pumps = 0;
+    this.cooldowns.shotgun = WEAPONS.shotgun.interval;
+    this.recoil = 2.4; this.recoilRot = 2.4;
+    this.pumpT = 0.5;
+    ctx.explode(at, P.blastRadius, P.blastDamage, 'pump', valve ? P.valveForce : P.selfForce, valve ? 0 : P.selfDamage);
+    ctx.fx.explosion(at, P.blastRadius * 0.8);
+    ctx.fx.freeze(0.07);
+    ctx.fx.shake(0.8);
+    this.flash(0.08, 1.2);
+    ctx.style('OVERPUMP', 70, true);
+  }
+
+  /** Jackhammer: a melee chop whose damage steps up with how fast you're moving. */
+  private swing(ctx: WeaponCtx): void {
+    const H = VARIANTS.hammer;
+    this.cooldowns.shotgun = H.interval;
+    this.swingT = 0.34;
+    const tier = this.impactTier;
+    const pumped = this.pumps;
+    const dmg = H.tiers[tier][1] * (1 + H.pumpMult * Math.min(pumped, 3));
+    let first: THREE.Vector3 | null = null;
+    let hit = 0;
+    for (const v of ctx.enemies.views.values()) {
+      if (v.dead) continue;
+      const c = v.centre();
+      const to = c.clone().sub(ctx.eye);
+      const dd = to.length() - v.def.radius;
+      if (dd > H.range || to.normalize().dot(ctx.fwd) < H.cone) continue;
+      if (!lineOfSight(ctx.eye, c)) continue;
+      ctx.damage(v, dmg, 'hammer', false, c, ctx.fwd);
+      if (!first) first = c;
+      hit++;
+    }
+    // the hammer launches your own cores like a punch does
+    for (const core of this.cores) {
+      if (!core.local || core.pos.distanceTo(ctx.eye) > H.range + 0.5) continue;
+      core.vel.copy(ctx.fwd).multiplyScalar(52);
+      core.life = Math.max(core.life, 1);
+      if (this.ups.has('m_hotcore')) core.hot = true;
+      ctx.style('HOMERUN', 60);
+    }
+    this.pumps = 0;
+    if (pumped >= 3) this.overpump(ctx, first ? new THREE.Vector3(first.x, first.y, first.z) : this.eyeFront(ctx, 1.6));
+    if (hit) {
+      ctx.fx.freeze(tier === 2 ? 0.12 : tier === 1 ? 0.07 : 0.04);
+      ctx.fx.shake(tier === 2 ? 0.7 : 0.35);
+      ctx.audio.play('metal_heavy', { volume: 0.9, pitch: tier === 2 ? 0.6 : 0.85 });
+      ctx.audio.play('armor', { volume: 0.8, pitch: 0.7 });
+      ctx.audio.synth('thump', 1);
+      if (first) ctx.fx.sparks(first, 14 + tier * 12, 8 + tier * 4, COLORS.spark, 0.12);
+      if (tier === 2) ctx.style('HIGH IMPACT', 70, true);
+    } else {
+      ctx.audio.play('whoosh', { volume: 0.5, pitch: 0.7 });
+    }
+    ctx.sendFx({ t: 'punch' });
+  }
+
+  /** Shotgun pellet with PIERCING BUCKSHOT: the first enemy and the one behind it. */
+  private pelletPierce(ctx: WeaponCtx, d: THREE.Vector3, range: number, first: EnemyHit): EnemyHit[] {
+    const wall = raycastWorld(ctx.eye, d, range);
+    const hits = ctx.enemies.raycast(ctx.eye, d, wall ? wall.dist : range);
+    const second = hits.find((h) => h.view !== first.view);
+    return second ? [first, second] : [first];
+  }
+
+  private freeze(ctx: WeaponCtx): void {
+    this.frozen = true;
+    ctx.audio.play('forcefield', { volume: 0.4, pitch: 1.6, dur: 0.4 });
+    for (const r of this.rockets) if (r.local && !r.frozenVel) this.freezeRocket(r, ctx);
+  }
+
+  private freezeRocket(r: Rocket, ctx: WeaponCtx): void {
+    r.frozenVel = r.vel.clone();
+    r.frozenAt = ctx.now;
+    r.vel.set(0, 0, 0);
+    const glow = r.mesh.children[1] as THREE.Sprite | undefined;
+    if (glow) (glow.material as THREE.SpriteMaterial).color.setHex(0x80d8ff);
+    ctx.sendFx({ t: 'rocket', id: r.id, p: v3(r.pos), v: [0, 0, 0] });
+  }
+
+  private unfreeze(ctx: WeaponCtx): void {
+    this.frozen = false;
+    let n = 0;
+    for (const r of this.rockets) {
+      if (!r.local || !r.frozenVel) continue;
+      if (this.ups.has('m_cold') && ctx.now - (r.frozenAt ?? ctx.now) >= VARIANTS.freeze.coldTime) r.cold = true;
+      r.vel.copy(r.frozenVel);
+      r.frozenVel = undefined;
+      const glow = r.mesh.children[1] as THREE.Sprite | undefined;
+      if (glow) (glow.material as THREE.SpriteMaterial).color.setHex(r.cold ? 0xa0f0ff : 0xff8030);
+      ctx.sendFx({ t: 'rocket', id: r.id, p: v3(r.pos), v: v3(r.vel) });
+      n++;
+    }
+    if (n) ctx.audio.play('thruster', { volume: 0.5, pitch: 1.3 });
+    if (n >= 3) ctx.style(`VOLLEY x${n}`, 30 * n, n >= 5);
+  }
+
+  private spawnBomblets(at: THREE.Vector3): void {
+    const C = VARIANTS.cluster;
+    for (let i = 0; i < C.n; i++) {
+      const a = (i / C.n) * Math.PI * 2 + Math.random();
+      const vel = new THREE.Vector3(Math.cos(a) * C.speed, C.speed * 0.9, Math.sin(a) * C.speed);
+      const mesh = new THREE.Mesh(this.bombletGeo, this.bombletMat);
+      mesh.position.copy(at);
+      this.world.add(mesh);
+      this.bomblets.push({ pos: at.clone().add(new THREE.Vector3(0, 0.3, 0)), vel, t: C.fuse + Math.random() * 0.3, mesh });
+    }
+  }
+
+  private updateBomblets(dt: number, ctx: WeaponCtx): void {
+    const C = VARIANTS.cluster;
+    for (const b of [...this.bomblets]) {
+      b.t -= dt;
+      b.vel.y -= 22 * dt;
+      const step = b.vel.length() * dt;
+      const wall = raycastWorld(b.pos, b.vel.clone().normalize(), step + 0.1);
+      let touch = false;
+      for (const v of ctx.enemies.views.values()) if (!v.dead && v.centre().distanceTo(b.pos) < v.def.radius + 0.5) { touch = true; break; }
+      if (wall || touch || b.t <= 0) {
+        this.world.remove(b.mesh);
+        this.bomblets.splice(this.bomblets.indexOf(b), 1);
+        ctx.explode(b.pos, C.radius, C.damage, 'rocket', 4, 0);
+        ctx.fx.explosion(b.pos, C.radius * 0.7);
+        continue;
+      }
+      b.pos.addScaledVector(b.vel, dt);
+      b.mesh.position.copy(b.pos);
+      if (Math.random() < 0.5) ctx.fx.fireTrail(b.pos, COLORS.fire, 0.2);
+    }
+  }
+
   // ------------------------------------------------------------------ remote fx
 
   remoteFx(from: string, m: FxMsg, fx: FX, audio: Audio): void {
     const P = (v: V) => ({ x: v[0], y: v[1], z: v[2] });
     switch (m.t) {
       case 'shot':
+        if (m.w === 'beam') {
+          for (const to of m.to) fx.tracer(P(m.from), P(to), 0x70e8ff, 0.14, 0.3);
+          audio.play('laser_large', { at: P(m.from), volume: 0.7, pitch: 1.6 });
+          break;
+        }
         for (const to of m.to) fx.tracer(P(m.from), P(to), m.w === 'revolver' ? 0xfff0a0 : 0xffd080, m.w === 'revolver' ? 0.035 : 0.02, 0.09);
         fx.muzzle(P(m.from), COLORS.spark, 0.8);
         audio.play(m.w, { at: P(m.from), volume: 0.8 });
@@ -852,6 +1248,22 @@ export class Weapons {
     m.rotation.set(this.recoilRot * 0.22 * def.kick - sw * 0.9 + pump * 0.18, this.sway.x * 2 + sw * 0.5, this.tilt - pump * 0.25);
     // revolver cylinder "spin" is faked with a quick roll twitch
     if (this.current === 'revolver') m.rotation.z += Math.sin(this.spin) * 0.02;
+    // charging a beam or spinning up a spinshot: the gun trembles harder the longer it's held
+    if (this.current === 'revolver' && this.chargeT >= 0) {
+      const k = Math.min(1, this.chargeT / VARIANTS.beam.over);
+      m.position.x += (Math.random() - 0.5) * 0.006 * k;
+      m.position.y += (Math.random() - 0.5) * 0.006 * k;
+      if (this.variant() === 'v_ricochet') { this.spin += dt * (10 + 40 * k); m.rotation.z += Math.sin(this.spin) * 0.05; }
+    }
+    // jackhammer: an overhead chop from right to left
+    if (this.current === 'shotgun' && this.hammer && this.swingT > 0) {
+      const k = 1 - this.swingT / 0.34;
+      const arc = Math.sin(Math.min(1, k * 1.6) * Math.PI);
+      m.rotation.x -= arc * 1.1;
+      m.rotation.z += arc * 0.6;
+      m.position.z -= arc * 0.12;
+      m.position.x -= arc * 0.1;
+    }
     this.flashT = Math.max(0, this.flashT - dt);
     this.muzzleFlash.visible = this.flashT > 0;
     if (this.muzzleFlash.visible) this.muzzleFlash.position.copy(m.position).add(def.muzzle.clone().applyEuler(m.rotation));
@@ -871,8 +1283,43 @@ export class Weapons {
     for (const c of [...this.coinList]) this.removeCoin(c);
     for (const c of [...this.cores]) this.removeCore(c);
     for (const r of [...this.rockets]) this.removeRocket(r);
+    for (const b of this.bomblets) this.world.remove(b.mesh);
+    this.bomblets = [];
     this.coins = WEAPONS.revolver.coinCharges;
     this.coreCd = 0;
+    this.beamCd = 0;
+    this.spinCharges = VARIANTS.spin.charges;
+    this.pumps = 0;
+    this.frozen = false;
+    this.freezeEnergy = VARIANTS.freeze.max;
+    this.chargeT = -1;
+  }
+
+  /** One-line alt-fire status for the HUD. */
+  altLabel(): string {
+    const v = this.variant();
+    const bar = (f: number) => '▮'.repeat(Math.round(f * 5)).padEnd(5, '▯');
+    switch (v) {
+      case 'v_coin': return `COINS ${'●'.repeat(this.coins)}${'○'.repeat(WEAPONS.revolver.coinCharges - this.coins)}`;
+      case 'v_beam':
+        if (this.beamCd > 0) return `BEAM ${this.beamCd.toFixed(1)}s`;
+        if (this.chargeT >= 0) return this.chargeT >= VARIANTS.beam.over && this.ups.has('m_overcharge') ? 'OVERCHARGED' : this.chargeT >= VARIANTS.beam.charge ? 'BEAM CHARGED' : `CHARGING ${bar(this.chargeT / VARIANTS.beam.charge)}`;
+        return 'BEAM READY · HOLD RMB';
+      case 'v_ricochet': {
+        const b = this.chargeT >= 0 ? VARIANTS.spin.times.filter((t) => this.chargeT >= t).length : -1;
+        return b >= 0 ? `SPIN · ${b} BOUNCE${b === 1 ? '' : 'S'}` : `SPINSHOT ${'●'.repeat(this.spinCharges)}${'○'.repeat(VARIANTS.spin.charges - this.spinCharges)}`;
+      }
+      case 'v_core': return this.coreCd > 0 ? `CORE ${this.coreCd.toFixed(1)}s` : 'CORE READY';
+      case 'v_pump': return this.pumps >= 3 ? 'OVERPUMP! FIRE TO BLAST' : `PUMP ${'●'.repeat(this.pumps)}${'○'.repeat(3 - this.pumps)}`;
+      case 'v_freeze': return this.frozen ? `FROZEN ${bar(this.freezeEnergy / VARIANTS.freeze.max)}` : `FREEZE ${bar(this.freezeEnergy / VARIANTS.freeze.max)}`;
+      default: return 'ALT: TAP BURST · HOLD STEER';
+    }
+  }
+
+  /** Hammer impact tier the player would hit with right now (0..2). */
+  get impactTier(): number {
+    const t = VARIANTS.hammer.tiers;
+    return this.impactSpeed >= t[2][0] ? 2 : this.impactSpeed >= t[1][0] ? 1 : 0;
   }
 
   /** Bot helper: any of our coins currently airborne. */

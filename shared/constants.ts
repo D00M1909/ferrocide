@@ -105,6 +105,29 @@ export const WEAPONS = {
   },
 } as const;
 
+/** Run variants, frames and upgrade effects (the sim sizes its anti-cheat caps from these too). */
+export const VARIANTS = {
+  beam: { charge: 0.5, over: 1.2, damage: 70, overDamage: 150, cooldown: 2.2, overKnock: 16 },
+  spin: { damage: 38, bounceMult: 1.5, charges: 2, regen: 4, times: [0.3, 1.1, 2.0], pierce: 3, homeCone: 0.42 },
+  pump: { pellets: [12, 18, 26], spread: [0.095, 0.125, 0.17], pumpTime: 0.22, blastRadius: 4.5, blastDamage: 130, selfDamage: 30, selfForce: 24, valveForce: 34 },
+  hammer: { interval: 0.7, range: 3.9, cone: 0.5, tiers: [[0, 55], [13, 110], [24, 200]] as [number, number][], pumpMult: 0.35, knock: 18 },
+  freeze: { max: 5, regen: 0.8, coldTime: 0.5, coldMult: 1.5 },
+  cluster: { n: 3, radius: 2.6, damage: 30, speed: 9, fuse: 0.55 },
+  hotCore: { radius: 9, damage: 200 },
+  slide: { damage: 30, cd: 0.4 },
+  burn: { damage: 10, life: 1.6, radius: 1.3, cd: 0.35, every: 0.05 },
+  kinetic: { perMeter: 8, radiusMul: 1.3, launch: 16 },
+  split: { second: 0.75 },
+  pierce: { second: 0.7 },
+  parryRush: { time: 1.6, speed: 1.3 },
+  styleEngine: { mult: 1.15, rank: 4 },
+  wallRunner: { extra: 2, stamina: 0.5 },
+  rebound: { heal: 8 },
+  bloodthirst: { range: 1.5, factor: 1.25 },
+  tether: { share: 0.5, range: 15 },
+  rally: { speed: 2, hp: 75 },
+};
+
 /** Health pickups: an option for players who fight at range and can't blood-heal. */
 export const HEALTH_PICKUP = {
   radius: 1.4, // horizontal grab distance from the pickup's centre

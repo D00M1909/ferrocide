@@ -45,9 +45,12 @@ export class ArenaRoom extends Room {
     this.onMessage('parry', (c: Client, m: unknown) => this.sim.playerParry(c.sessionId, m));
     this.onMessage('hurt', (c: Client, m: unknown) => this.sim.playerHurt(c.sessionId, m));
     this.onMessage('fx', (c: Client, m: unknown) => this.sim.playerFx(c.sessionId, m));
-    this.onMessage('start', (c: Client) => {
-      if (c.sessionId === this.hostId) this.sim.start();
+    this.onMessage('start', (c: Client, m: unknown) => {
+      if (c.sessionId !== this.hostId) return;
+      const mode = m && typeof m === 'object' ? (m as { mode?: unknown }).mode : undefined;
+      this.sim.start(1, mode === 'run' ? 'run' : 'classic');
     });
+    this.onMessage('forge', (c: Client, m: unknown) => this.sim.playerForge(c.sessionId, m));
     this.onMessage('retry', (c: Client) => {
       if (c.sessionId === this.hostId) this.sim.retry();
     });
@@ -68,6 +71,7 @@ export class ArenaRoom extends Room {
   override onJoin(client: Client, options: { name?: unknown } = {}): void {
     const name = String(options?.name || 'SLAYER').replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 14).toUpperCase() || 'SLAYER';
     if (!this.hostId) this.hostId = client.sessionId;
+    this.sim.hostId = this.hostId;
     this.sim.addPlayer(client.sessionId, name);
     logLine(`${name} joined room ${this.roomId} (${this.clients.length}/${MAX_PLAYERS})`);
   }
@@ -88,6 +92,7 @@ export class ArenaRoom extends Room {
     if (client.sessionId === this.hostId) {
       const next = this.sim.players.keys().next();
       this.hostId = next.done ? '' : next.value;
+      this.sim.hostId = this.hostId;
       if (this.hostId) this.clients.find((x) => x.sessionId === this.hostId)?.send('host', true);
     }
   }
@@ -105,8 +110,10 @@ export class ArenaRoom extends Room {
       host: client.sessionId === this.hostId,
       players: [...this.sim.players.values()].map((p) => ({ id: p.id, name: p.name })),
       phase: this.sim.phase,
+      mode: this.sim.mode,
     };
     client.send('welcome', welcome);
+    this.sim.resync();
   }
 
   private tick(dt: number): void {

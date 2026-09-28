@@ -18,6 +18,8 @@ export interface BotView {
   enemies: Enemies;
   hazards: Hazards;
   weapons: Weapons;
+  /** Run mode: a gate to walk through (host only), else null. */
+  gate?: Vec3 | null;
 }
 
 export class Bot {
@@ -49,6 +51,13 @@ export class Bot {
   update(dt: number, v: BotView): { yaw: number; pitch: number } {
     for (const a of ['forward', 'back', 'left', 'right', 'fire', 'slide', 'jump'] as Action[]) this.hold(a, false);
     if (!v.alive) return { yaw: v.yaw, pitch: v.pitch };
+    if (v.gate) {
+      // between rooms: walk straight through the chosen gate
+      const want = Math.atan2(-(v.gate.x - v.pos.x), -(v.gate.z - v.pos.z));
+      const yaw = v.yaw + angleDiff(v.yaw, want) * Math.min(1, dt * 8);
+      this.hold('forward', true);
+      return { yaw, pitch: v.pitch * 0.9 };
+    }
 
     // target selection (sticky)
     if (!this.target || this.target.dead || Math.random() < dt * 0.3) this.target = v.enemies.nearest(v.eye, 90);

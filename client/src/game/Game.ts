@@ -1,10 +1,12 @@
 // The orchestrator: owns the render loop, the local player, and routes network
 // snapshots/events to the enemy, hazard, weapon, FX, HUD and audio systems.
 import * as THREE from 'three';
-import { ENEMIES, PLAYER, PLAYER_SEND_RATE, SLAM, WEAPON_ORDER } from '../../../shared/constants';
+import { ENEMIES, PLAYER, PLAYER_SEND_RATE, SLAM, VARIANTS, WEAPON_ORDER } from '../../../shared/constants';
 import { Motor, type MoveInput } from '../../../shared/movement';
 import { HEALTH_PICKUPS, blockedAt } from '../../../shared/arena';
-import { PF, type GameEvent, type HitKind, type Phase, type PlayerStats, type Snapshot, type V } from '../../../shared/protocol';
+import { PF, type GameEvent, type GameMode, type HitKind, type Phase, type PlayerStats, type RunSnap, type Snapshot, type V } from '../../../shared/protocol';
+import { CHALLENGE_INFO, FINAL_DEPTH, GATE_SPOTS, REWARD_INFO, RUN, layerOf, roomOf } from '../../../shared/run';
+import { UPGRADE_BY_ID } from '../../../shared/upgrades';
 import { WAVES } from '../../../shared/waves';
 import { sprite } from '../engine/assets';
 import type { Audio } from '../engine/audio';
@@ -15,6 +17,7 @@ import type { Settings } from '../settings';
 import { Bot } from './bot';
 import { Enemies, type EnemyView } from './enemies';
 import { COLORS, FX } from './fx';
+import { Gates } from './gates';
 import { Hazards, type PlayerProbe } from './hazards';
 import { HUD } from './hud';
 import { RemotePlayer } from './remote';
@@ -29,7 +32,12 @@ export interface GameOverInfo {
   time: number;
   stats: PlayerStats[];
   selfId: string;
+  mode: GameMode;
+  ups: Record<string, string[]>;
 }
+
+/** The forge offers this player is looking at. */
+export interface ForgeOffers { offers: string[]; free: boolean; buy: number; reroll: number; rare: boolean }
 
 export class Game {
   readonly renderer: RetroRenderer;
@@ -41,6 +49,7 @@ export class Game {
   readonly weapons: Weapons;
   readonly style = new StyleMeter();
   readonly hud: HUD;
+  readonly gates: Gates;
   private motor = new Motor();
   private snaps = new SnapBuffer();
   private remotes = new Map<string, RemotePlayer>();
@@ -92,6 +101,18 @@ export class Game {
   onConnection: ((ok: boolean) => void) | null = null;
   fps = 0;
   private myRevive = 0;
+  // ---- run
+  gameMode: GameMode = 'classic';
+  run: RunSnap | null = null;
+  ups: string[] = [];
+  bank = 0;
+  forge: ForgeOffers | null = null;
+  onForge: ((f: ForgeOffers | null) => void) | null = null;
+  private slideHits = new Map<number, number>(); // slide blade: last cut per enemy
+  private burnHits = new Map<number, number>();
+  private trail: { p: THREE.Vector3; t: number }[] = [];
+  private trailT = 0;
+  private botGate = 0; // autoplay: which gate to walk into (varies each choice)
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement, readonly audio: Audio, readonly input: Input, public settings: Settings) {
     this.renderer = new RetroRenderer(canvas);
@@ -101,6 +122,8 @@ export class Game {
     this.enemies = new Enemies(this.world.scene, this.fx, audio, () => this.selfId, sprite('light_01'));
     this.hazards = new Hazards(this.world.scene, this.fx, audio, () => this.selfId);
     this.weapons = new Weapons(this.world.scene, () => this.selfId);
+    this.weapons.onVariant = (_w, name) => this.hud.toast(name);
+    this.gates = new Gates(this.world.scene);
     this.hud = new HUD(ui);
     this.hud.show(false);
     this.enemies.onLocalKill = (v, how) => this.onLocalKill(v, how);
@@ -182,6 +205,13 @@ export class Game {
     this.hud.setCenter(''); // a death message from the previous run must not carry over
     this.style.reset();
     this.style.total = 0;
+    this.gameMode = 'classic';
+    this.run = null;
+    this.bank = 0;
+    this.forge = null;
+    this.applyUpgrades([]);
+    this.gates.set(undefined);
+    this.trail = [];
     this.hud.show(true);
     this.bot = opts.bot ? new Bot(this.input) : null;
     this.input.enabled = true;
@@ -206,6 +236,8 @@ export class Game {
     this.wave = 0;
     this.input.virtual = null;
     this.bot = null;
+    this.gates.set(undefined);
+    this.forge = null;
   }
 
   setPaused(p: boolean): void {
@@ -241,6 +273,10 @@ export class Game {
     this.wave = s.wave;
     this.waveLeft = s.left;
     this.phaseTimer = s.timer;
+    this.gameMode = s.mode ?? 'classic';
+    this.run = s.run ?? null;
+    if (this.phase === 'choice' && this.run?.g && !this.gates.anyActive) this.gates.set(this.run.g);
+    else if (this.phase !== 'choice') this.gates.set(undefined);
     const seen = new Set<string>();
     for (const p of s.pl) {
       if (p[0] === this.selfId) {
@@ -251,6 +287,7 @@ export class Game {
         if (serverAlive && !this.alive) this.onRespawn({ x: p[1], y: p[2], z: p[3] });
         else if (!serverAlive && this.alive && this.phase === 'combat') this.onDeath();
         this.myRevive = p[15] ?? 0;
+        this.bank = p[19] ?? 0;
         continue;
       }
       seen.add(p[0]);
@@ -363,6 +400,52 @@ export class Game {
           else if (e.by === me) { this.hud.showBanner('PARTNER REVIVED', '', 1.6); this.style.add('SECOND WIND', 120, true); }
           this.audio.synth('rankup', 0.7);
           break;
+        case 'room': {
+          const room = roomOf(e.d);
+          const sub = [e.title, e.elite ? 'ELITE' : '', e.ch ? CHALLENGE_INFO[e.ch].name : ''].filter(Boolean).join(' · ');
+          this.hud.showBanner(e.boss ? 'WARNING' : `${e.layer} ${room}/${RUN.roomsPerLayer}`, sub, 2.6);
+          this.audio.play('door', { volume: 0.35, pitch: 0.6, dur: 0.6 });
+          if (e.boss) void this.audio.playMusic('boss');
+          else if (room === 1 || e.d === 1) void this.audio.playMusic(layerOf(e.d) >= 1 ? 'combat2' : 'combat1');
+          break;
+        }
+        case 'gates':
+          this.gates.set(e.gates);
+          this.botGate = Math.floor(Math.random() * 3);
+          this.hud.showBanner('CHOOSE YOUR PATH', this.link?.isHost ? 'WALK THROUGH A GATE' : 'YOUR PARTNER PICKS THE GATE', 2.4);
+          this.audio.play('forcefield', { volume: 0.3, pitch: 0.7, dur: 0.6 });
+          break;
+        case 'gate':
+          this.gates.choose(e.i);
+          this.audio.play('thruster', { volume: 0.6, pitch: 0.8 });
+          this.audio.synth('rankup', 0.5);
+          this.flashAmt = 0.25;
+          this.flashColor.set(0xffc080);
+          break;
+        case 'prize': {
+          const info = REWARD_INFO[e.k];
+          if (!e.ok) this.hud.showBanner('TOO SLOW', `${info.name} FORFEITED`, 2.4);
+          else if (e.k === 'repair') { this.hud.showBanner('REPAIRED', 'FULL HEALTH', 2); this.audio.synth('pickup', 0.8); }
+          else if (e.amt) this.hud.showBanner(`+${e.amt} STYLE`, 'TO SPEND AT THE FORGE', 2.2);
+          break;
+        }
+        case 'offers':
+          if (e.pid !== me) break;
+          this.forge = { offers: e.offers, free: e.free, buy: e.buy, reroll: e.reroll, rare: e.rare };
+          this.onForge?.(this.forge);
+          break;
+        case 'forgedone':
+          if (e.pid === me) { this.forge = null; this.onForge?.(null); }
+          break;
+        case 'upg':
+          if (e.pid === me) this.applyUpgrades(e.list);
+          break;
+        case 'forged':
+          if (e.pid === me) {
+            this.audio.synth('rankup', 0.7);
+            this.audio.play('metal_heavy', { volume: 0.5, pitch: 1.2 });
+          } else this.hud.kill(`${this.names.get(e.pid) ?? 'PARTNER'} FORGED ${UPGRADE_BY_ID.get(e.id)?.name ?? ''}`);
+          break;
         case 'wave': {
           this.hud.showBanner(e.boss ? 'WARNING' : `WAVE ${e.n}`, e.title, 2.6);
           this.audio.play('door', { volume: 0.35, pitch: 0.6, dur: 0.6 });
@@ -371,7 +454,8 @@ export class Game {
           break;
         }
         case 'clear':
-          this.hud.showBanner('WAVE CLEARED', e.n < WAVES.length ? 'BREATHE' : '', 2.2);
+          if (this.gameMode === 'run') this.hud.showBanner('ROOM CLEARED', e.n < FINAL_DEPTH ? '' : 'THE CORE IS SILENT', 2.2);
+          else this.hud.showBanner('WAVE CLEARED', e.n < WAVES.length ? 'BREATHE' : '', 2.2);
           this.style.total += 150;
           this.audio.synth('rankup', 0.8);
           break;
@@ -383,7 +467,7 @@ export class Game {
           break;
         case 'over':
           this.input.exitLock();
-          this.onGameOver?.({ win: e.win, wave: e.wave, time: e.time, stats: e.stats, selfId: me });
+          this.onGameOver?.({ win: e.win, wave: e.wave, time: e.time, stats: e.stats, selfId: me, mode: e.mode ?? 'classic', ups: e.ups ?? {} });
           void this.audio.playMusic('menu');
           break;
         case 'reset':
@@ -392,8 +476,14 @@ export class Game {
           this.hazards.clear();
           this.weapons.clear();
           this.style.reset();
-          this.hud.showBanner('RETRY', `WAVE ${e.wave}`, 2);
           this.onReset?.();
+          if (this.gameMode === 'run') {
+            this.style.total = 0; // a new run starts with an empty wallet
+            this.hud.showBanner('NEW RUN', RUN.layers[0].name, 2);
+            void this.audio.playMusic('combat1');
+            break;
+          }
+          this.hud.showBanner('RETRY', `WAVE ${e.wave}`, 2);
           void this.audio.playMusic(e.wave >= WAVES.length ? 'boss' : e.wave >= 5 ? 'combat2' : 'combat1');
           break;
         case 'join':
@@ -466,6 +556,37 @@ export class Game {
     this.flashAmt = 0.45;
     this.flashColor.set(0xfff4d0);
     this.style.add(melee ? 'COUNTERPUNCH' : 'PARRY', melee ? 170 : 150, true);
+    if (this.has('g_parryrush')) {
+      this.motor.stamina = PLAYER.staminaMax;
+      this.motor.boostT = VARIANTS.parryRush.time;
+      this.motor.boostMul = VARIANTS.parryRush.speed;
+      this.fovKick = 1;
+    }
+  }
+
+  has(id: string): boolean {
+    return this.ups.includes(id);
+  }
+
+  private applyUpgrades(list: string[]): void {
+    this.ups = [...list];
+    this.weapons.setUpgrades(list);
+    const wr = this.has('g_wallrunner');
+    this.motor.mods.extraWallJumps = wr ? VARIANTS.wallRunner.extra : 0;
+    this.motor.mods.wallJumpStamina = wr ? VARIANTS.wallRunner.stamina : 0;
+  }
+
+  /** Damage multiplier from run upgrades and the room's challenge. */
+  private dmgMul(): number {
+    let m = 1;
+    if (this.has('g_styleengine') && this.style.rank >= VARIANTS.styleEngine.rank) m *= VARIANTS.styleEngine.mult;
+    if (this.run?.ch === 'glass') m *= 1.5;
+    return m;
+  }
+
+  refundDash(): void {
+    this.motor.stamina = Math.min(PLAYER.staminaMax, this.motor.stamina + 1);
+    this.audio.synth('dash', 0.25);
   }
 
   private onLocalKill(v: EnemyView, how: string): void {
@@ -490,6 +611,10 @@ export class Game {
     this.lastKillT = now;
     this.weapons.noteKill();
     if (this.weapons.arsenal()) s.add('ARSENAL', 120, true);
+    if (this.has('g_airkill') && !this.motor.grounded) this.refundDash();
+    if (how === 'hammer' && this.has('m_momentum')) this.refundDash();
+    if (how === 'slide') s.add('SLICED', 60);
+    if (how === 'burn') s.add('SCORCHED', 40);
     this.fx.freeze(v.def.heavy ? 0.14 : 0.04);
     this.audio.play('gore', { volume: 0.55, pitch: 1.2 });
     this.audio.play('metal_heavy', { volume: 0.35, pitch: 1.6 });
@@ -515,6 +640,7 @@ export class Game {
       audio: this.audio,
       damage: (v, dmg, kind, head, point, dir, extra) => {
         if (v.dead) return;
+        dmg *= this.dmgMul();
         (v as EnemyView & { lastHead?: boolean }).lastHead = head;
         const w = weaponOf(kind);
         if (w) {
@@ -543,6 +669,7 @@ export class Game {
 
   private explode(p: { x: number; y: number; z: number }, r: number, dmg: number, kind: HitKind, force: number, selfDmg: number): void {
     if (!this.link) return;
+    dmg *= this.dmgMul();
     const pv: V = [r2(p.x), r2(p.y), r2(p.z)];
     this.link.boom({ p: pv, r, d: dmg, k: kind });
     this.audio.play(r > 4.5 ? 'explosion' : 'explosion_small', { at: p, volume: 1, reverb: 0.5 });
@@ -556,7 +683,7 @@ export class Game {
       const dir = new THREE.Vector3(c.x - p.x, c.y - p.y + 0.6, c.z - p.z).normalize();
       this.motor.impulse({ x: dir.x * force * k, y: Math.max(dir.y, 0.4) * force * k * 1.1, z: dir.z * force * k });
       if (selfDmg > 0) this.link.hurt({ src: 'self', d: selfDmg * k });
-      if (!this.motor.grounded || dir.y > 0.5) this.style.add(kind === 'core' ? 'CORE JUMP' : 'ROCKET JUMP', 25);
+      if (!this.motor.grounded || dir.y > 0.5) this.style.add(kind === 'core' ? 'CORE JUMP' : kind === 'pump' ? 'BLAST JUMP' : 'ROCKET JUMP', 25);
     }
   }
 
@@ -601,6 +728,7 @@ export class Game {
       const aim = this.bot.update(dt, {
         pos: this.motor.pos, eye: this.eyePos(), yaw: this.yaw, pitch: this.pitch, grounded: this.motor.grounded,
         alive: this.alive, enemies: this.enemies, hazards: this.hazards, weapons: this.weapons,
+        gate: this.phase === 'choice' && this.gameMode === 'run' && link.isHost && this.run?.g?.length ? GATE_SPOTS[this.botGate % this.run.g.length] : null,
       });
       this.yaw = aim.yaw;
       this.pitch = aim.pitch;
@@ -635,6 +763,7 @@ export class Game {
         first = false;
       }
       this.pushOutOfEnemies();
+      this.movementUpgrades(worldDt);
       // failsafe: anything that ever escapes the arena is put back on the dais
       if (this.motor.pos.y < -8 || Math.abs(this.motor.pos.x) > 37 || Math.abs(this.motor.pos.z) > 37) {
         this.motor.reset({ x: 0, y: 1.3, z: 4 });
@@ -673,6 +802,7 @@ export class Game {
     }
     this.fx.update(worldDt);
     this.world.update(worldDt, this.time);
+    this.gates.update(worldDt);
     this.style.update(worldDt, this.phase === 'combat');
 
     // music intensity follows the fight and the style rank
@@ -710,18 +840,77 @@ export class Game {
 
     this.updateCamera(dt);
     this.updatePost(dt);
+    if (this.alive && this.phase === 'choice' && this.gameMode === 'run') {
+      this.hud.setCenter(link.isHost || !link.online ? 'WALK THROUGH A GATE TO CHOOSE THE NEXT ROOM' : 'YOUR PARTNER IS CHOOSING A GATE');
+    } else if (this.alive) this.hud.setCenter('');
+    const variant = this.weapons.variant();
+    const vname = this.weapons.variantList(this.weapons.current).length > 1 || this.gameMode === 'run' ? UPGRADE_BY_ID.get(variant)?.name ?? '' : '';
     this.hud.update(dt, {
       fps: this.settings.showFps ? this.fps : null,
-      hp: this.hp, hard: this.hard, stamina: this.motor.stamina, weapon: this.weapons.current, coins: this.weapons.coins,
-      coreCd: this.weapons.coreCd, style: this.style, wave: this.wave, waves: WAVES.length,
+      hp: this.hp, hard: this.hard, stamina: this.motor.stamina, weapon: this.weapons.current, alt: this.weapons.altLabel(),
+      variant: this.weapons.current === 'shotgun' && this.weapons.hammer ? `JACKHAMMER · ${vname}` : vname,
+      impact: this.weapons.current === 'shotgun' && this.weapons.hammer ? this.weapons.impactTier : -1,
+      style: this.style, wave: this.wave, waves: WAVES.length,
       title: WAVES[this.wave - 1]?.title ?? '', left: this.waveLeft, phase: this.phase,
       timer: this.phaseTimer, boss: this.bossInfo(), ping: link.ping, online: link.online,
+      run: this.gameMode === 'run' ? this.run : null, bank: this.bank,
     });
     const partner = [...this.remotes.values()][0];
     this.hud.setPartner(partner ? partner.name : null, partner?.hp ?? 0, partner?.alive ?? false, partner?.connected ?? true);
     this.audio.setListener(eye, this.yaw);
     this.renderer.render(this.world.scene, this.camera, this.alive ? this.weapons.vmScene : null, this.weapons.vmCam);
     this.input.endFrame();
+  }
+
+  /** Slide Blade cuts what you slide through; Afterburner leaves burning slag behind dashes. */
+  private movementUpgrades(dt: number): void {
+    const m = this.motor;
+    const now = this.time;
+    const blade = this.has('g_slideblade') && m.sliding;
+    const burner = this.has('g_afterburner');
+    if (!blade && !burner) return;
+    const ctx = blade || this.trail.length ? this.weaponCtx() : null;
+    if (blade && ctx) {
+      for (const v of this.enemies.views.values()) {
+        if (v.dead || v.spawnT > 0.5) continue;
+        const reach = v.def.radius + 1.0;
+        if (Math.hypot(v.pos.x - m.pos.x, v.pos.z - m.pos.z) > reach) continue;
+        const base = v.def.flying ? v.pos.y - v.def.radius : v.pos.y;
+        if (m.pos.y > base + (v.def.flying ? v.def.radius * 2 : v.def.height) || m.pos.y + 1.2 < base) continue;
+        if (now - (this.slideHits.get(v.id) ?? -9) < VARIANTS.slide.cd) continue;
+        this.slideHits.set(v.id, now);
+        const c = v.centre();
+        ctx.damage(v, VARIANTS.slide.damage, 'slide', false, c, this.fwd);
+        this.fx.sparks(c, 14, 7, COLORS.spark, 0.1);
+        this.audio.play('metal_light', { at: c, volume: 0.6, pitch: 1.4 });
+      }
+    }
+    if (burner) {
+      const B = VARIANTS.burn;
+      if (m.dashing) {
+        this.trailT -= dt;
+        if (this.trailT <= 0) {
+          this.trailT = B.every;
+          this.trail.push({ p: new THREE.Vector3(m.pos.x, m.pos.y + 0.3, m.pos.z), t: B.life });
+        }
+      }
+      for (const pt of this.trail) {
+        pt.t -= dt;
+        if (Math.random() < dt * 14) this.fx.fireTrail({ x: pt.p.x + (Math.random() - 0.5) * 0.6, y: pt.p.y, z: pt.p.z + (Math.random() - 0.5) * 0.6 }, COLORS.fire, 0.3 + pt.t * 0.2);
+      }
+      this.trail = this.trail.filter((pt) => pt.t > 0);
+      if (this.trail.length && ctx) {
+        for (const v of this.enemies.views.values()) {
+          if (v.dead || v.spawnT > 0.5) continue;
+          if (now - (this.burnHits.get(v.id) ?? -9) < B.cd) continue;
+          const c = v.centre();
+          const near = this.trail.some((pt) => Math.hypot(pt.p.x - c.x, pt.p.z - c.z) < B.radius + v.def.radius && Math.abs(pt.p.y - v.pos.y) < (v.def.flying ? 2 : v.def.height));
+          if (!near) continue;
+          this.burnHits.set(v.id, now);
+          ctx.damage(v, B.damage, 'burn', false, c, this.fwd);
+        }
+      }
+    }
   }
 
   /** Enemies are solid: no running through husks or standing inside the colossus. */
@@ -752,7 +941,7 @@ export class Game {
     const b = this.enemies.boss;
     if (!b) return null;
     const coop = this.remotes.size > 0 ? 1.5 : 1;
-    return { hp: b.effectiveHp, max: ENEMIES.colossus.hp * coop };
+    return { hp: b.effectiveHp, max: Math.max(b.maxHp, ENEMIES.colossus.hp * coop) };
   }
 
   private eyePos(): THREE.Vector3 {
@@ -789,8 +978,11 @@ export class Game {
           this.audio.play('whoosh', { volume: 0.7, pitch: 0.6 });
           break;
         case 'slamland': {
-          const r = SLAM.radius, dmg = SLAM.baseDamage + e.fall * SLAM.damagePerMeter;
+          const kin = this.has('g_kinetic');
+          const r = SLAM.radius * (kin ? VARIANTS.kinetic.radiusMul : 1);
+          const dmg = (SLAM.baseDamage + Math.min(40, e.fall) * (kin ? VARIANTS.kinetic.perMeter : SLAM.damagePerMeter)) * this.dmgMul();
           this.link?.boom({ p: [r2(m.pos.x), r2(m.pos.y + 0.5), r2(m.pos.z)], r, d: dmg, k: 'slam' });
+          if (kin) { this.fx.shake(0.5); this.fx.explosion({ x: m.pos.x, y: m.pos.y + 0.3, z: m.pos.z }, r * 0.5, COLORS.fire); }
           this.fx.dust(m.pos, 26, 6);
           this.fx.shake(Math.min(0.8, 0.3 + e.fall * 0.03));
           this.landDip = 0.45;
@@ -872,6 +1064,8 @@ export class Game {
       pos: { ...this.motor.pos }, enemies: this.enemies.views.size, projectiles: this.hazards.projectiles.size,
       style: Math.round(this.style.total), rank: this.style.rank, weapon: this.weapons.current, fps: Math.round(this.fps),
       remotes: this.remotes.size, shots: this.weapons.shotsFired, interp: Math.round(this.snaps.delay * 1000),
+      gameMode: this.gameMode, run: this.run, ups: this.ups, bank: this.bank, forge: this.forge,
+      variant: this.weapons.variant(), styleTotal: Math.round(this.style.total),
     };
   }
 }
@@ -882,8 +1076,8 @@ function r2(n: number): number {
 
 /** Which gun a damage kind belongs to (punches, slams and parries belong to none). */
 function weaponOf(kind: string): string | undefined {
-  if (kind === 'revolver' || kind === 'ricoshot') return 'revolver';
-  if (kind === 'shotgun' || kind === 'core') return 'shotgun';
+  if (kind === 'revolver' || kind === 'ricoshot' || kind === 'beam' || kind === 'spin') return 'revolver';
+  if (kind === 'shotgun' || kind === 'core' || kind === 'hammer' || kind === 'pump') return 'shotgun';
   if (kind === 'rocket') return 'launcher';
   return undefined;
 }

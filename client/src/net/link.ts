@@ -2,7 +2,7 @@
 // (GameSim runs in-browser) or co-op (GameSim runs in a Colyseus room).
 import { Client, type Room } from '@colyseus/sdk';
 import { SERVER_TICK, SNAPSHOT_RATE } from '../../../shared/constants';
-import type { BoomMsg, FxMsg, GameEvent, HitMsg, HurtMsg, ParryMsg, Snapshot, StateMsg, WelcomeMsg } from '../../../shared/protocol';
+import type { BoomMsg, ForgeMsg, FxMsg, GameEvent, GameMode, HitMsg, HurtMsg, ParryMsg, Snapshot, StateMsg, WelcomeMsg } from '../../../shared/protocol';
 import { GameSim } from '../../../shared/sim';
 
 export interface NetHandlers {
@@ -28,7 +28,8 @@ export interface NetLink {
   parry(m: ParryMsg): void;
   hurt(m: HurtMsg): void;
   fx(m: FxMsg): void;
-  start(): void;
+  forge(m: ForgeMsg): void;
+  start(mode: GameMode): void;
   retry(): void;
   update(dt: number): void;
   leave(): void;
@@ -45,12 +46,14 @@ export class LocalLink implements NetLink {
   handlers: Partial<NetHandlers> = {};
   private sim = new GameSim();
   private acc = 0;
-  /** Dev/test flags: ?wave=N starts at a later wave, ?god=1 ignores damage. */
+  /** Dev/test flags: ?wave=N starts at a later wave (run: depth), ?god=1 ignores damage, ?up=a,b grants run upgrades. */
   private startWave = Number(new URLSearchParams(location.search).get('wave') || 1);
   private god = new URLSearchParams(location.search).get('god') === '1';
+  private ups = (new URLSearchParams(location.search).get('up') ?? '').split(',').filter(Boolean);
 
   constructor(name: string) {
     this.sim.addPlayer(this.id, name);
+    this.sim.hostId = this.id;
   }
 
   state(m: StateMsg): void { this.sim.playerState(this.id, m); }
@@ -59,7 +62,8 @@ export class LocalLink implements NetLink {
   parry(m: ParryMsg): void { this.sim.playerParry(this.id, m); this.flush(); }
   hurt(m: HurtMsg): void { if (!this.god) this.sim.playerHurt(this.id, m); this.flush(); }
   fx(_m: FxMsg): void { /* nobody else to tell */ }
-  start(): void { this.sim.start(this.startWave); }
+  forge(m: ForgeMsg): void { this.sim.playerForge(this.id, m); this.flush(); }
+  start(mode: GameMode): void { this.sim.start(this.startWave, mode, this.ups); }
   retry(): void { this.sim.retry(); }
 
   update(dt: number): void {
@@ -179,7 +183,8 @@ export class ColyseusLink implements NetLink {
   parry(m: ParryMsg): void { this.room.send('parry', m); }
   hurt(m: HurtMsg): void { this.room.send('hurt', m); }
   fx(m: FxMsg): void { this.room.send('fx', m); }
-  start(): void { this.room.send('start', 1); }
+  forge(m: ForgeMsg): void { this.room.send('forge', m); }
+  start(mode: GameMode): void { this.room.send('start', { mode }); }
   retry(): void { this.room.send('retry', 1); }
   update(): void { /* network pushes to us */ }
 

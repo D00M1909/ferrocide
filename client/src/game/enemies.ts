@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { ENEMIES, type EnemyKind } from '../../../shared/constants';
 import { angleDiff, pointSegmentDist, raySphere, type Vec3 } from '../../../shared/math';
-import { ENEMY_KINDS, ENEMY_STATES, type EnemySnap, type EnemyState, type GameEvent, type Snapshot } from '../../../shared/protocol';
+import { ELITE_KINDS, ENEMY_KINDS, ENEMY_STATES, type EnemySnap, type EnemyState, type GameEvent, type Snapshot } from '../../../shared/protocol';
 import { instance, playClip, type ModelInstance, type ModelName } from '../engine/assets';
 import type { Audio } from '../engine/audio';
 import { COLORS, type FX } from './fx';
@@ -82,6 +82,8 @@ const hornGeo = new THREE.ConeGeometry(0.5, 1, 4);
 const hornMat = new THREE.MeshLambertMaterial({ color: 0x1a1614, emissive: 0x120200 });
 
 const PARRYABLE_ATTACKS = new Set(['orb', 'mortar']);
+/** Elite aura colours: armoured, swift, volatile. */
+export const ELITE_COLORS = [0x7fa8ff, 0x9dff5a, 0xff7a1a];
 
 export class EnemyView {
   inst: ModelInstance;
@@ -90,6 +92,9 @@ export class EnemyView {
   yaw = 0;
   state: EnemyState = 'spawn';
   hp: number;
+  maxHp = 0; // largest hp seen (run bosses scale, so the HUD bar can't use the base value)
+  elite = 0; // 1 + index into ELITE_KINDS, 0 = none
+  aura: THREE.Sprite | null = null;
   predicted = 0; // damage we've dealt locally that the server hasn't confirmed yet
   predictedAt = 0;
   dead = false;
@@ -160,6 +165,20 @@ export class EnemyView {
     this.inst.root.add(this.glow);
     this.glow.position.y = this.def.flying ? 0 : this.def.headY;
     this.play('spawn');
+  }
+
+  /** Elite affix: a coloured aura and a slightly bigger body so they read at a glance. */
+  setElite(i: number, glowTex: THREE.Texture): void {
+    if (!i || this.elite === i) return;
+    this.elite = i;
+    const color = ELITE_COLORS[i - 1] ?? 0xffffff;
+    this.aura = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.3, fog: false }));
+    const s = this.def.flying ? 1.8 : this.def.height * 1.05;
+    this.aura.scale.set(s, s, 1);
+    this.aura.position.y = this.def.flying ? 0 : this.def.height * 0.5;
+    this.inst.root.add(this.aura);
+    this.inst.inner.scale.multiplyScalar(1.12);
+    for (const m of this.inst.materials) (m as THREE.MeshLambertMaterial).emissive?.setHex(color).multiplyScalar(0.12);
   }
 
   play(key: EnemyState | 'death' | 'idle' | 'leap' | 'hit', attack = '', once = false, speed = 1): void {
@@ -243,6 +262,8 @@ export class Enemies {
         v.predicted = Math.max(0, v.predicted - (v.hp - e[7]));
       }
       v.hp = e[7];
+      v.maxHp = Math.max(v.maxHp, e[7]);
+      if (e[8]) v.setElite(e[8], this.glowTex);
       if (st !== v.state) this.onState(v, st);
     }
     // enemies gone from the latest snapshot without a kill event (reset, kamikaze cleanup)
@@ -273,6 +294,7 @@ export class Enemies {
         const v = this.ensure(e.id, e.k, { x: e.p[0], y: e.p[1], z: e.p[2] });
         v.lastSeen = now;
         v.spawnT = 1;
+        if (e.el) v.setElite(ELITE_KINDS.indexOf(e.el) + 1, this.glowTex);
         const c = v.centre();
         const big = ENEMIES[e.k].heavy;
         this.fx.magic(c, big ? 60 : 24, COLORS.hostile, big ? 8 : 4, big ? 1 : 0.5);
@@ -453,6 +475,7 @@ export class Enemies {
         v.eyes.position.set(v.headWorld.x + hfx * hs * 0.9, v.headWorld.y + hs * 0.15, v.headWorld.z + hfz * hs * 0.9);
       }
       (v.eyes.material as THREE.SpriteMaterial).opacity = 0.75 + Math.sin(now * 9 + v.id) * 0.25;
+      if (v.aura) (v.aura.material as THREE.SpriteMaterial).opacity = 0.26 + Math.sin(now * 5 + v.id) * 0.08;
       v.horns.position.copy(v.headWorld);
       v.horns.rotation.y = v.yaw;
       // eyes + horns grow in with the spawn scale-in

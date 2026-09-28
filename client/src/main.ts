@@ -1,12 +1,14 @@
 // Boot, menus, lobby, pause and results screens.
 import './style.css';
 import { GAME_NAME } from '../../shared/constants';
-import type { Phase, WelcomeMsg } from '../../shared/protocol';
+import type { GameMode, Phase, WelcomeMsg } from '../../shared/protocol';
+import { FINAL_DEPTH, RUN, isBossDepth, layerOf, roomOf } from '../../shared/run';
+import { UPGRADE_BY_ID, type UpgradeDef } from '../../shared/upgrades';
 import { WAVES } from '../../shared/waves';
 import { loadAssets } from './engine/assets';
 import { Audio } from './engine/audio';
 import { Input } from './engine/input';
-import { Game, type GameOverInfo } from './game/Game';
+import { Game, type ForgeOffers, type GameOverInfo } from './game/Game';
 import { finalGrade } from './game/style';
 import { ColyseusLink, LocalLink, serverHttp, wakeServer, type NetLink } from './net/link';
 import { loadSettings, saveSettings, type Settings } from './settings';
@@ -69,6 +71,7 @@ async function boot(): Promise<void> {
   game.onPause = (p) => (p ? showPause() : hidePause());
   game.onDisconnect = (r) => { game.end(); mainMenu(r); };
   game.onPhase = (p) => onPhase(p);
+  game.onForge = (f) => (f ? showForge(f) : closeForge());
   // a retry (from either player) closes everyone's results screen
   game.onReset = () => {
     if (screen?.classList.contains('results-screen')) { show(null); gate(); }
@@ -103,7 +106,7 @@ async function boot(): Promise<void> {
     if (game.mode === 'play' && !botMode && !screen && !pauseEl && !clickGate && document.pointerLockElement !== canvas) input.requestLock();
   });
   const auto = params.get('autostart');
-  if (auto === 'solo') startSolo();
+  if (auto === 'solo') startSolo(params.get('mode') === 'run' ? 'run' : 'classic');
   else if (auto === 'host') void startOnline('host');
   else if (auto === 'join') void startOnline('join', params.get('code') ?? '');
   else mainMenu();
@@ -140,11 +143,13 @@ function mainMenu(error = ''): void {
         <div class="section-label">CALLSIGN</div>
         <input type="text" id="name" maxlength="14" placeholder="SLAYER" value="${esc(settings.name)}" />
         <div class="section-label">DEPLOY</div>
-        <button class="primary" id="solo">PLAY SOLO</button>
+        <button class="primary" id="run">START A RUN <small>SOLO · ROGUELIKE</small></button>
+        <button id="solo">CLASSIC <small>SOLO · 8 WAVES</small></button>
         <button id="host">HOST CO-OP</button>
         <div class="row"><input type="text" id="code" maxlength="4" placeholder="CODE" style="width:118px" /><button id="join" style="flex:1">JOIN CO-OP</button></div>
         <div class="section-label">SYSTEM</div>
         <div class="row"><button id="settings" style="flex:1">SETTINGS</button><button id="controls" style="flex:1">CONTROLS</button></div>
+        ${bestLine()}
         <div class="err" id="err">${esc(error)}</div>
         ${game?.renderer.softwareRendering ? '<div class="err">HARDWARE ACCELERATION IS OFF: the game will run slowly. Turn on "Use graphics acceleration when available" in your browser settings, then restart the browser.</div>' : ''}
       </div>
@@ -155,12 +160,14 @@ function mainMenu(error = ''): void {
       <p><span class="k">PARRY <b>YELLOW</b>.</span> Punch (F) glowing orbs, bolts and mortars straight back, or punch a husk mid-swing.</p>
       <p><span class="k">STYLE PAYS.</span> Toss a coin, then shoot it. Shoot your own shotgun core. Rotate weapons: repeat kills score less.</p>
       <p><span class="k">RED CRYSTALS</span> restore health, but respawn slowly.</p>
+      <p><span class="k">RUNS.</span> Three layers of six rooms and a boss. Pick a gate after every room, forge upgrades that change your guns and movement, spend style on more.</p>
     </div>
   `, 'menu-layout');
   show(el);
   const name = el.querySelector<HTMLInputElement>('#name')!;
   name.addEventListener('input', () => { settings.name = name.value.toUpperCase(); saveSettings(settings); });
-  el.querySelector('#solo')!.addEventListener('click', () => { blip(); startSolo(); });
+  el.querySelector('#run')!.addEventListener('click', () => { blip(); startSolo('run'); });
+  el.querySelector('#solo')!.addEventListener('click', () => { blip(); startSolo('classic'); });
   el.querySelector('#host')!.addEventListener('click', () => { blip(); void startOnline('host'); });
   const code = el.querySelector<HTMLInputElement>('#code')!;
   const join = () => { blip(); void startOnline('join', code.value); };
@@ -189,6 +196,12 @@ function controlsScreen(back: () => void): void {
         <div><b>SCATTERHAMMER</b> shotgun</div><div>RMB lobs a core — shoot or punch it to detonate</div>
         <div><b>SLAGTHROWER</b> rockets</div><div>hold RMB to steer rockets to your crosshair · tap to airburst · rocket jump!</div>
         <div><b>PARRY</b> punch yellow orbs/mortars</div><div>press a beat early, it still counts · reflects them, heals ${50} HP</div>
+      </div>
+      <h2 style="margin-top:18px">RUNS</h2>
+      <div class="controls">
+        <div><b>GATES</b> walk through one after a room</div><div>each shows what clearing the next room pays</div>
+        <div><b>FORGE</b> one free pick per visit</div><div>buy more or reroll with style · 1-4 pick · ENTER leaves</div>
+        <div><b>VARIANTS</b> new alt-fires for each gun</div><div>press the gun's number again to switch variant</div>
       </div>
       <div style="margin-top:18px"><button id="back">BACK</button></div>
     </div>`);
@@ -259,11 +272,13 @@ function settingsScreen(back: () => void): void {
 
 let lobbyOpen = false;
 
-function startSolo(): void {
+let lobbyMode: GameMode = 'run';
+
+function startSolo(mode: GameMode): void {
   const link = new LocalLink(settings.name || 'SLAYER');
   show(null);
   game.begin(link, [{ id: link.id, name: settings.name || 'SLAYER' }], { bot: botMode });
-  link.start();
+  link.start(mode);
   gate();
 }
 
@@ -281,19 +296,21 @@ async function startOnline(mode: 'host' | 'join', code = ''): Promise<void> {
         <div class="wake-bar"><i></i></div>
         <div class="wake-time"></div>
         <div class="hint">The free server sleeps when nobody is playing. Waking it usually takes under a minute, sometimes two. Solo is always instant.</div>
+        <div class="hint wake-blocked" style="display:none">Taking a while? Ad blockers and browser VPNs often block the co-op server. Allow <b>onrender.com</b> for this site, then try again.</div>
         <div class="row"><button id="wake-cancel">CANCEL</button><button id="wake-solo" class="primary">PLAY SOLO INSTEAD</button></div>`);
       wake.querySelector('#wake-cancel')!.addEventListener('click', () => { blip(); cancelled = true; mainMenu(); });
-      wake.querySelector('#wake-solo')!.addEventListener('click', () => { blip(); cancelled = true; startSolo(); });
+      wake.querySelector('#wake-solo')!.addEventListener('click', () => { blip(); cancelled = true; startSolo('run'); });
       show(wake);
     }
     // the bar fills over ~90 s, then crawls, so it never sits "full" while we're still waiting
     const f = s < 90 ? s / 90 : 1 - 0.1 * Math.exp(-(s - 90) / 30);
     (wake.querySelector('.wake-bar i') as HTMLElement).style.width = `${Math.min(99, f * 100)}%`;
     wake.querySelector('.wake-time')!.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    if (s >= 20) (wake.querySelector('.wake-blocked') as HTMLElement).style.display = '';
   }, 150, () => cancelled);
   if (cancelled) return;
   if (wake) show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
-  if (!awake) { mainMenu('The co-op server did not wake up in time. Try again in a minute; solo always works.'); return; }
+  if (!awake) { mainMenu('Could not reach the co-op server. If you use an ad blocker or a browser VPN, allow onrender.com and try again; otherwise it may still be waking, so try again in a minute. Solo always works.'); return; }
   try {
     res = await ColyseusLink.connect(mode, settings.name || 'SLAYER', code);
   } catch (e) {
@@ -315,6 +332,10 @@ function lobby(link: NetLink): void {
       <label class="small">ROOM CODE — SHARE WITH YOUR PARTNER</label>
       <div class="code">${esc(link.code)}</div>
       <div class="hint" id="players"></div>
+      <div class="seg" id="mode">
+        <button data-m="run">RUN</button><button data-m="classic">CLASSIC</button>
+      </div>
+      <div class="hint" id="modehint"></div>
       <div style="display:flex;gap:8px;justify-content:center;margin-top:14px">
         <button id="start" class="primary">START</button>
         <button id="leave">LEAVE</button>
@@ -325,10 +346,22 @@ function lobby(link: NetLink): void {
   const players = el.querySelector<HTMLElement>('#players')!;
   const start = el.querySelector<HTMLButtonElement>('#start')!;
   const wait = el.querySelector<HTMLElement>('#wait')!;
+  const modeBtns = [...el.querySelectorAll<HTMLButtonElement>('#mode button')];
+  const modeHint = el.querySelector<HTMLElement>('#modehint')!;
+  const paintMode = () => {
+    for (const b of modeBtns) {
+      b.classList.toggle('on', b.dataset.m === lobbyMode);
+      b.disabled = !link.isHost;
+    }
+    modeHint.textContent = !link.isHost ? 'The host picks the mode.' : lobbyMode === 'run' ? 'Roguelike: gates, forges, three layers.' : 'The 8-wave arena.';
+  };
+  for (const b of modeBtns) b.addEventListener('click', () => { blip(); lobbyMode = b.dataset.m === 'classic' ? 'classic' : 'run'; paintMode(); });
+  paintMode();
   const refresh = () => {
     const names = [...new Set([...(game as unknown as { names: Map<string, string> }).names.values()])];
     players.innerHTML = `IN ROOM: ${names.map(esc).join(' · ') || '…'}`;
     start.disabled = !link.isHost;
+    paintMode();
     wait.textContent = link.isHost ? (names.length < 2 ? 'You can start alone — your partner can drop in any time.' : 'Both slayers ready.') : 'Waiting for the host to start…';
   };
   refresh();
@@ -337,12 +370,13 @@ function lobby(link: NetLink): void {
     refresh();
     if (game.phase !== 'lobby') { lobbyOpen = false; clearInterval(timer); show(null); gate(); }
   }, 250);
-  start.addEventListener('click', () => { blip(); link.start(); });
+  start.addEventListener('click', () => { blip(); link.start(lobbyMode); });
   el.querySelector('#leave')!.addEventListener('click', () => { blip(); lobbyOpen = false; clearInterval(timer); game.end(); mainMenu(); });
-  if (botMode && link.isHost && params.get('autostart') === 'host') setTimeout(() => link.start(), Number(params.get('startDelay') ?? 4000));
+  if (botMode && link.isHost && params.get('autostart') === 'host') setTimeout(() => link.start(params.get('mode') === 'run' ? 'run' : 'classic'), Number(params.get('startDelay') ?? 4000));
 }
 
 function onPhase(p: Phase): void {
+  if (p !== 'forge') closeForge();
   if (p === 'lobby') return;
   if (lobbyOpen) { lobbyOpen = false; show(null); gate(); }
 }
@@ -376,7 +410,7 @@ function showPause(): void {
       <button id="controls">CONTROLS</button>
       <button id="quit">QUIT TO MENU</button>
     </div>
-    <div class="hint">${game.link?.online ? `CO-OP ROOM ${esc(game.link.code)} — the fight goes on while you're paused!` : 'Solo — the world is frozen.'}</div>`);
+    <div class="hint">${game.link?.online ? `CO-OP ROOM <span class="code-inline">${esc(game.link.code)}</span> — the fight goes on while you're paused!` : 'Solo — the world is frozen.'}</div>`);
   ui.appendChild(pauseEl);
   pauseEl.querySelector('#resume')!.addEventListener('click', () => { blip(); input.requestLock(); });
   pauseEl.querySelector('#settings')!.addEventListener('click', () => {
@@ -401,6 +435,8 @@ function hidePause(): void {
 function showResults(info: GameOverInfo): void {
   hidePause();
   clickGate?.remove();
+  closeForge();
+  if (info.mode === 'run') { showRunSummary(info); return; }
   const me = info.stats.find((s) => s.id === info.selfId) ?? info.stats[0];
   const grade = finalGrade(me?.style ?? 0, info.time, me?.deaths ?? 0, info.win);
   const mins = Math.floor(info.time / 60), secs = Math.floor(info.time % 60);
@@ -424,6 +460,159 @@ function showResults(info: GameOverInfo): void {
     game.link?.retry();
     show(null);
     void audio.playMusic(info.wave >= WAVES.length ? 'boss' : 'combat1');
+    gate();
+  });
+  el.querySelector('#menu')!.addEventListener('click', () => { blip(); game.end(); mainMenu(); });
+}
+
+// ------------------------------------------------------------------ runs
+
+const BEST_KEY = 'ferrocide.bestRun';
+interface BestRun { depth: number; time: number; style: number; win: boolean }
+
+function loadBest(): BestRun | null {
+  try { return JSON.parse(localStorage.getItem(BEST_KEY) ?? 'null') as BestRun | null; } catch { return null; }
+}
+
+function depthLabel(d: number): string {
+  if (d >= FINAL_DEPTH) return 'THE CORE · BOSS';
+  return `${RUN.layers[layerOf(d)].name} · ${isBossDepth(d) ? 'BOSS' : `ROOM ${roomOf(d)}/${RUN.roomsPerLayer}`}`;
+}
+
+function fmtTime(t: number): string {
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+}
+
+function bestLine(): string {
+  const b = loadBest();
+  if (!b) return '';
+  return `<div class="best">BEST RUN · ${b.win ? 'CLEARED' : esc(depthLabel(b.depth))} · ${fmtTime(b.time)}</div>`;
+}
+
+const CAT_LABEL: Record<UpgradeDef['cat'], string> = { variant: 'VARIANT', mod: 'MOD', move: 'MOVEMENT', blood: 'BLOOD', coop: 'CO-OP' };
+const GUN_LABEL: Record<string, string> = { revolver: 'PIERCER', shotgun: 'SCATTERHAMMER', launcher: 'SLAGTHROWER' };
+
+let forgeEl: HTMLElement | null = null;
+let forgeTimer: ReturnType<typeof setInterval> | null = null;
+let forgeBotT: ReturnType<typeof setTimeout> | null = null;
+
+function upgradeCard(u: UpgradeDef, i: number, action: string, disabled: boolean): string {
+  const tag = `${CAT_LABEL[u.cat]}${u.weapon ? ` · ${GUN_LABEL[u.weapon]}` : ''}${u.rare ? ' · RARE' : ''}`;
+  return `<button class="card cat-${u.cat}" data-i="${i}" ${disabled ? 'disabled' : ''}>
+    <span class="tag">${i + 1} · ${tag}</span>
+    <span class="name">${esc(u.name)}</span>
+    <span class="desc">${esc(u.desc)}</span>
+    <span class="act">${action}</span>
+  </button>`;
+}
+
+/** The forge: one free pick, then buy more or reroll with style. */
+function showForge(f: ForgeOffers): void {
+  if (!game.link) return;
+  hidePause();
+  clickGate?.remove();
+  clickGate = null;
+  input.exitLock();
+  const bank = game.bank;
+  const owned = game.ups.map((id) => UPGRADE_BY_ID.get(id)?.name).filter(Boolean).join(' · ') || 'nothing yet';
+  const cards = f.offers.map((id, i) => {
+    const u = UPGRADE_BY_ID.get(id);
+    if (!u) return '';
+    return upgradeCard(u, i, f.free ? 'TAKE · FREE' : `BUY · ◆ ${f.buy.toLocaleString('en-US')}`, !f.free && bank < f.buy);
+  }).join('');
+  const el = h(`
+    <div class="panel forge">
+      <h2>${f.rare ? 'RARE FORGE' : 'THE FORGE'}</h2>
+      <div class="forge-top"><span>${f.free ? 'CHOOSE ONE UPGRADE, FREE' : 'SPEND STYLE FOR MORE'}</span><span class="bank-big">◆ <b id="fbank">${bank.toLocaleString('en-US')}</b></span></div>
+      <div class="forge-cards">${cards || '<div class="hint">Nothing left to forge.</div>'}</div>
+      <div class="row forge-actions">
+        <button id="reroll" ${bank < f.reroll ? 'disabled' : ''}>REROLL · ◆ ${f.reroll.toLocaleString('en-US')}</button>
+        <button id="done" class="${f.free ? '' : 'primary'}">${f.free ? 'SKIP THE FREE PICK' : 'CONTINUE ▸'}</button>
+      </div>
+      <div class="hint" id="ftime"></div>
+      <div class="hint owned">OWNED: ${esc(owned)}</div>
+    </div>`);
+  el.classList.add('forge-screen');
+  forgeEl = el;
+  show(el);
+  const send = (a: 'pick' | 'buy' | 'reroll' | 'done', i?: number) => { blip(); game.link?.forge({ a, i }); };
+  el.querySelectorAll<HTMLButtonElement>('.card').forEach((b) => b.addEventListener('click', () => send(f.free ? 'pick' : 'buy', Number(b.dataset.i))));
+  el.querySelector('#reroll')!.addEventListener('click', () => send('reroll'));
+  el.querySelector('#done')!.addEventListener('click', () => send('done'));
+  const onKey = (e: KeyboardEvent) => {
+    if (!el.isConnected) { window.removeEventListener('keydown', onKey); return; }
+    const n = Number(e.key);
+    if (n >= 1 && n <= f.offers.length) {
+      const b = el.querySelector<HTMLButtonElement>(`.card[data-i="${n - 1}"]`);
+      if (b && !b.disabled) b.click();
+    } else if (e.key === 'Enter' && !f.free) send('done');
+  };
+  window.addEventListener('keydown', onKey);
+  if (forgeTimer) clearInterval(forgeTimer);
+  forgeTimer = setInterval(() => {
+    if (!el.isConnected) { if (forgeTimer) clearInterval(forgeTimer); return; }
+    el.querySelector('#fbank')!.textContent = game.bank.toLocaleString('en-US');
+    el.querySelector('#ftime')!.textContent = `THE FORGE CLOSES IN ${Math.ceil(game.phaseTimer)}s`;
+  }, 200);
+  // autoplay: take the first offer, then move on
+  if (botMode) {
+    if (forgeBotT) clearTimeout(forgeBotT);
+    forgeBotT = setTimeout(() => game.link?.forge(f.free && f.offers.length ? { a: 'pick', i: 0 } : { a: 'done' }), 800);
+  }
+}
+
+let forgeWait: HTMLElement | null = null;
+
+function closeForge(): void {
+  if (forgeTimer) clearInterval(forgeTimer);
+  const was = forgeEl ?? forgeWait;
+  if (!was) return;
+  forgeEl = null;
+  if (screen !== was) { forgeWait = null; return; }
+  // the partner may still be shopping: say so; the forge closes when everyone is done
+  if (game.phase === 'forge') {
+    forgeWait = h('<div class="loading">WAITING FOR YOUR PARTNER TO FINISH FORGING…</div>');
+    show(forgeWait);
+    return;
+  }
+  forgeWait = null;
+  show(null);
+  if (game.mode === 'play' && game.phase !== 'over' && game.phase !== 'victory') gate();
+}
+
+function showRunSummary(info: GameOverInfo): void {
+  const me = info.stats.find((s) => s.id === info.selfId) ?? info.stats[0];
+  const grade = finalGrade(me?.style ?? 0, info.time, me?.deaths ?? 0, info.win);
+  const prev = loadBest();
+  const better = !prev || info.win && !prev.win || info.wave > prev.depth || (info.wave === prev.depth && info.time < prev.time);
+  if (better) {
+    try { localStorage.setItem(BEST_KEY, JSON.stringify({ depth: info.wave, time: info.time, style: me?.style ?? 0, win: info.win })); } catch { /* private mode */ }
+  }
+  const rows = info.stats.map((s) => `<tr><td>${esc(s.name)}${s.id === info.selfId ? ' (YOU)' : ''}</td><td>${s.kills}</td><td>${s.damage}</td><td>${s.style}</td><td>${s.parries}</td><td>${s.deaths}</td></tr>`).join('');
+  const builds = info.stats.map((s) => {
+    const names = (info.ups[s.id] ?? []).map((id) => UPGRADE_BY_ID.get(id)?.name).filter(Boolean);
+    return `<div class="build"><b>${esc(s.name)}</b> ${names.length ? esc(names.join(' · ')) : '<i>no upgrades</i>'}</div>`;
+  }).join('');
+  const canRetry = game.link?.isHost !== false;
+  const el = h(`
+    <div class="panel results">
+      <h2>${info.win ? 'THE CORE FALLS SILENT' : `FELL IN THE ${esc(depthLabel(info.wave))}`}</h2>
+      <div class="hint" style="margin:0 auto">${better ? 'NEW BEST RUN' : prev ? `BEST · ${prev.win ? 'CLEARED' : esc(depthLabel(prev.depth))} · ${fmtTime(prev.time)}` : ''}</div>
+      <div class="final-rank" style="color:${grade.color}">${grade.name}</div>
+      <div class="hint" style="margin:0 auto">ROOM ${info.wave}/${FINAL_DEPTH} · TIME ${fmtTime(info.time)}</div>
+      <table><tr><th>SLAYER</th><th>KILLS</th><th>DAMAGE</th><th>STYLE</th><th>PARRIES</th><th>DEATHS</th></tr>${rows}</table>
+      <div class="builds">${builds}</div>
+      <div style="display:flex;gap:8px">
+        ${canRetry ? '<button class="primary" id="retry">NEW RUN</button>' : '<div class="hint" style="align-self:center">WAITING FOR THE HOST…</div>'}
+        <button id="menu">MAIN MENU</button>
+      </div>
+    </div>`);
+  el.classList.add('results-screen');
+  show(el);
+  el.querySelector('#retry')?.addEventListener('click', () => {
+    blip();
+    game.link?.retry();
+    show(null);
     gate();
   });
   el.querySelector('#menu')!.addEventListener('click', () => { blip(); game.end(); mainMenu(); });

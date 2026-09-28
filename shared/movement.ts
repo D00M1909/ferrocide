@@ -47,6 +47,10 @@ export class Motor {
   lavaT = 0;
   airTime = 0;
   events: MoveEvent[] = [];
+  /** Run upgrades: extra wall jumps, dash refilled per wall jump, and a timed speed burst. */
+  mods = { extraWallJumps: 0, wallJumpStamina: 0 };
+  boostT = 0;
+  boostMul = 1;
 
   get dashing(): boolean {
     return this.dashT > 0;
@@ -87,6 +91,8 @@ export class Motor {
     if (inp.jumpPressed) this.jumpBuffer = P.jumpBuffer;
     else this.jumpBuffer = Math.max(0, this.jumpBuffer - dt);
     this.slamBounceT = Math.max(0, this.slamBounceT - dt);
+    this.boostT = Math.max(0, this.boostT - dt);
+    const speedMul = this.boostT > 0 ? this.boostMul : 1;
     if (!this.dashing) this.stamina = Math.min(P.staminaMax, this.stamina + P.staminaRegen * dt);
 
     // ---- dash
@@ -150,7 +156,7 @@ export class Motor {
       this.sliding = false;
       this.grounded = false;
       this.events.push({ t: 'jump', kind });
-    } else if (this.jumpBuffer > 0 && !this.grounded && !this.slamming && this.wallJumps < P.maxWallJumps) {
+    } else if (this.jumpBuffer > 0 && !this.grounded && !this.slamming && this.wallJumps < P.maxWallJumps + this.mods.extraWallJumps) {
       const wall = wallContact(this.pos, P.halfWidth, this.height, 0.35);
       if (wall) {
         this.jumpBuffer = 0;
@@ -160,6 +166,7 @@ export class Motor {
         this.vel.z = wall.z * push + (hasWish ? wz * 5 : 0);
         this.vel.y = P.wallJumpVelocity;
         this.dashT = 0;
+        this.stamina = Math.min(P.staminaMax, this.stamina + this.mods.wallJumpStamina);
         this.events.push({ t: 'jump', kind: 'wall' });
       }
     }
@@ -197,10 +204,10 @@ export class Motor {
         this.vel.x *= ns;
         this.vel.z *= ns;
       }
-      if (hasWish) this.accelerate(wx, wz, P.walkSpeed, P.groundAccel, dt);
+      if (hasWish) this.accelerate(wx, wz, P.walkSpeed * speedMul, P.groundAccel, dt);
     } else if (hasWish) {
       const before = Math.hypot(this.vel.x, this.vel.z);
-      this.accelerate(wx, wz, P.airMaxSpeed, P.airAccel, dt);
+      this.accelerate(wx, wz, P.airMaxSpeed * speedMul, P.airAccel, dt);
       // air strafing can redirect momentum but not farm unlimited speed
       const after = Math.hypot(this.vel.x, this.vel.z);
       const cap = Math.max(before, P.airSpeedCap);

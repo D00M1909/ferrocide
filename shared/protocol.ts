@@ -1,5 +1,6 @@
 // Wire format shared by the Colyseus room and the in-browser local server.
 import type { EnemyKind, ProjectileKind } from './constants';
+import type { Challenge, Elite, Gate, Reward } from './run';
 
 export type V = [number, number, number];
 
@@ -23,7 +24,21 @@ export const PF = {
   firing: 16,
 } as const;
 
-export type HitKind = 'revolver' | 'ricoshot' | 'shotgun' | 'punch' | 'parry' | 'explosion' | 'slam' | 'rocket' | 'core';
+export type HitKind =
+  | 'revolver' | 'ricoshot' | 'shotgun' | 'punch' | 'parry' | 'explosion' | 'slam' | 'rocket' | 'core'
+  | 'beam' | 'spin' | 'hammer' | 'pump' | 'slide' | 'burn';
+
+export type GameMode = 'classic' | 'run';
+
+export interface StartMsg {
+  mode: GameMode;
+}
+
+/** Forge actions: take the free pick, buy another offer, reroll the offers, or leave. */
+export interface ForgeMsg {
+  a: 'pick' | 'buy' | 'reroll' | 'done';
+  i?: number; // offer index
+}
 
 export interface HitMsg {
   e: number; // enemy id
@@ -56,7 +71,7 @@ export interface HurtMsg {
 
 /** Cosmetic events relayed to other players (tracers, coins, rockets...). */
 export type FxMsg =
-  | { t: 'shot'; w: 'revolver' | 'shotgun'; from: V; to: V[] }
+  | { t: 'shot'; w: 'revolver' | 'shotgun' | 'beam'; from: V; to: V[] }
   | { t: 'coin'; p: V; v: V; id: number }
   | { t: 'coinhit'; id: number }
   | { t: 'rocket'; id: number; p: V; v: V }
@@ -68,12 +83,21 @@ export type FxMsg =
 
 // ------------------------------------------------------------ server -> client
 
-/** [id, kind index, x, y, z, yaw, state index, hp] */
-export type EnemySnap = [number, number, number, number, number, number, number, number];
+/** [id, kind index, x, y, z, yaw, state index, hp, elite index + 1 (0 = none)] */
+export type EnemySnap = [number, number, number, number, number, number, number, number, number?];
 /** [id, kind index, x, y, z, vx, vy, vz, reflected?1:0] */
 export type ProjSnap = [number, number, number, number, number, number, number, number, number];
-/** [id, x, y, z, vx, vy, vz, yaw, pitch, flags, weapon, hp, alive, hardDamage, connected, revive 0..1, deathX, deathY, deathZ] */
-export type PlayerSnap = [string, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
+/** [id, x, y, z, vx, vy, vz, yaw, pitch, flags, weapon, hp, alive, hardDamage, connected, revive 0..1, deathX, deathY, deathZ, style to spend] */
+export type PlayerSnap = [string, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number?];
+
+/** Run state riding on every snapshot (absent in classic). */
+export interface RunSnap {
+  d: number; // depth (1-based room number across the run)
+  g?: Gate[]; // gates on offer (choice phase)
+  prize?: Reward; // what clearing the current room pays
+  ch?: Challenge; // current room's challenge
+  tl?: number; // time trial: seconds left
+}
 
 export interface Snapshot {
   t: number;
@@ -85,12 +109,15 @@ export interface Snapshot {
   left: number; // enemies remaining in wave
   timer: number; // phase timer (intermission countdown)
   pk: number; // bitmask of health pickups currently available (index into HEALTH_PICKUPS)
+  mode?: GameMode;
+  run?: RunSnap;
 }
 
-export type Phase = 'lobby' | 'intermission' | 'combat' | 'over' | 'victory';
+export type Phase = 'lobby' | 'intermission' | 'combat' | 'choice' | 'forge' | 'over' | 'victory';
 
 export const ENEMY_KINDS: EnemyKind[] = ['husk', 'eye', 'warden', 'drone', 'brute', 'colossus', 'stalker'];
 export const PROJ_KINDS: ProjectileKind[] = ['orb', 'bolt', 'mortar', 'reflected'];
+export const ELITE_KINDS: Elite[] = ['armored', 'swift', 'volatile'];
 export const ENEMY_STATES = ['spawn', 'move', 'windup', 'attack', 'recover', 'stun', 'dive', 'beam'] as const;
 export type EnemyState = (typeof ENEMY_STATES)[number];
 
@@ -106,7 +133,7 @@ export interface PlayerStats {
 }
 
 export type GameEvent =
-  | { t: 'spawn'; id: number; k: EnemyKind; p: V }
+  | { t: 'spawn'; id: number; k: EnemyKind; p: V; el?: Elite }
   | { t: 'dmg'; id: number; d: number; by: string; hs: boolean; k: string; p: V }
   | { t: 'kill'; id: number; k: EnemyKind; by: string; how: string; p: V; hs: boolean }
   | { t: 'phurt'; pid: string; d: number; hp: number; hard: number; src: HurtSource }
@@ -127,7 +154,15 @@ export type GameEvent =
   | { t: 'revive'; pid: string; by: string }
   | { t: 'enrage'; id: number }
   | { t: 'fx'; from: string; fx: FxMsg }
-  | { t: 'over'; win: boolean; wave: number; time: number; stats: PlayerStats[] }
+  | { t: 'over'; win: boolean; wave: number; time: number; stats: PlayerStats[]; mode?: GameMode; ups?: Record<string, string[]> }
+  | { t: 'gates'; gates: Gate[] }
+  | { t: 'gate'; i: number; by: string }
+  | { t: 'room'; d: number; layer: string; title: string; boss: boolean; elite: boolean; ch?: Challenge; prize?: Reward }
+  | { t: 'prize'; k: Reward; ok: boolean; amt?: number }
+  | { t: 'offers'; pid: string; offers: string[]; free: boolean; buy: number; reroll: number; rare: boolean }
+  | { t: 'upg'; pid: string; list: string[] }
+  | { t: 'forged'; pid: string; id: string }
+  | { t: 'forgedone'; pid: string }
   | { t: 'reset'; wave: number }
   | { t: 'join'; pid: string; name: string }
   | { t: 'leave'; pid: string };
@@ -138,6 +173,7 @@ export interface WelcomeMsg {
   host: boolean;
   players: { id: string; name: string }[];
   phase: Phase;
+  mode?: GameMode;
 }
 
 export const r2 = (n: number): number => Math.round(n * 100) / 100;

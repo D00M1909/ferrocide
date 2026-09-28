@@ -7,15 +7,20 @@ import {
   AIR_SPAWNS, GROUND_SPAWNS, HEALTH_PICKUPS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, blockedAt, inZone, lineOfSight, moveBody, raycastWorld,
 } from './arena';
 import {
-  ENEMIES, ENEMY_ATTACKS, HEALTH_PICKUP, PLAYER, PROJECTILES, PUNCH, SLAM, WEAPONS, type EnemyKind, type ProjectileKind,
+  ENEMIES, ENEMY_ATTACKS, HEALTH_PICKUP, PLAYER, PROJECTILES, PUNCH, SLAM, VARIANTS, WEAPONS, type EnemyKind, type ProjectileKind,
 } from './constants';
 import { angleDiff, clamp, dist, distXZ, rng, type Vec3 } from './math';
 import {
-  ENEMY_KINDS, ENEMY_STATES, PROJ_KINDS, r2,
-  type EnemyState, type FxMsg, type GameEvent, type HitKind, type HurtSource, type Phase,
-  type PlayerSnap, type PlayerStats, type Snapshot, type V,
+  ELITE_KINDS, ENEMY_KINDS, ENEMY_STATES, PROJ_KINDS, r2,
+  type EnemyState, type FxMsg, type GameEvent, type GameMode, type HitKind, type HurtSource, type Phase,
+  type PlayerSnap, type PlayerStats, type RunSnap, type Snapshot, type V,
 } from './protocol';
-import { MAX_ALIVE, WAVES } from './waves';
+import {
+  ELITES, FINAL_DEPTH, GATE_RADIUS, GATE_SPOTS, RUN, enemyScale, isBossDepth, layerOf, planGates, planRoom,
+  type Challenge, type Elite, type Gate, type Reward, type RoomPlan,
+} from './run';
+import { UPGRADES, UPGRADE_BY_ID, eligible } from './upgrades';
+import { MAX_ALIVE, WAVES, type WaveDef } from './waves';
 
 interface SimPlayer {
   id: string;
@@ -39,7 +44,13 @@ interface SimPlayer {
   healBudget: number; // blood-heal rate limiter
   deathPos: Vec3;
   revive: number; // 0..REVIVE_TIME progress while a partner stands on the corpse
+  ups: string[]; // run upgrades
+  spent: number; // style spent at forges
+  bonus: number; // style granted by caches
+  forge: ForgeState | null;
 }
+
+interface ForgeState { offers: string[]; free: boolean; buys: number; rerolls: number; done: boolean; rare: boolean }
 
 interface SimEnemy {
   id: number;
@@ -67,6 +78,8 @@ interface SimEnemy {
   lastStrikeDmg: number;
   invulnT: number;
   blinkCd: number;
+  elite: Elite | null;
+  spdMul: number;
 }
 
 interface SimProjectile {
@@ -101,11 +114,17 @@ const HIT_CAP: Partial<Record<HitKind, number>> = {
   shotgun: WEAPONS.shotgun.pellets * WEAPONS.shotgun.pelletDamage * WEAPONS.shotgun.closeMult * 1.25 + 1,
   punch: PUNCH.damage + 1,
   rocket: WEAPONS.launcher.directDamage + 1,
+  beam: VARIANTS.beam.overDamage * WEAPONS.revolver.headshotMult + 1,
+  spin: VARIANTS.spin.damage * VARIANTS.spin.bounceMult ** 3 * WEAPONS.revolver.headshotMult + 1,
+  hammer: VARIANTS.hammer.tiers[2][1] * (1 + VARIANTS.hammer.pumpMult * 3) + 1,
+  slide: VARIANTS.slide.damage + 1,
+  burn: VARIANTS.burn.damage + 1,
 };
 const BOOM_CAP: Partial<Record<HitKind, { r: number; d: number }>> = {
   rocket: { r: WEAPONS.launcher.splashRadius * WEAPONS.launcher.airburstRadiusMult + 0.1, d: WEAPONS.launcher.splashDamage },
   core: { r: WEAPONS.shotgun.coreShotRadius, d: WEAPONS.shotgun.coreShotDamage },
   slam: { r: SLAM.radius, d: SLAM.baseDamage + SLAM.damagePerMeter * 40 },
+  pump: { r: VARIANTS.pump.blastRadius, d: VARIANTS.pump.blastDamage },
 };
 /** Own-property lookup only: "toString"/"constructor" must never resolve to a cap. */
 function capOf<T>(table: Partial<Record<HitKind, T>>, k: unknown): T | undefined {
@@ -114,10 +133,12 @@ function capOf<T>(table: Partial<Record<HitKind, T>>, k: unknown): T | undefined
 const HURT_SOURCES: HurtSource[] = ['proj', 'melee', 'shock', 'beam', 'boom', 'lava', 'self'];
 const HIT_RANGE = 110; // arena diagonal is ~100 m
 // damage budget ~1.5x the best legitimate sustained DPS (swap-cancel rotation ~350)
-const BUDGET_MAX = 700;
-const BUDGET_REFILL = 520; // per second
+const BUDGET_MAX = 1200; // run variants (an overcharged beam through a crowd) spike harder than classic
+const BUDGET_REFILL = 700; // per second
 const BOOM_TOKENS = 5; // explosion claims: bursts allowed, sustained rate capped
 const BOOM_REFILL = 3;
+const CLUSTER_TOKENS = 16; // cluster rockets: every rocket is four explosions
+const CLUSTER_REFILL = 9;
 const BLOOD_HEAL_RATE = 35; // hp/s ceiling on blood healing
 const REVIVE_TIME = 2; // seconds a partner must stand on your corpse
 const REVIVE_RADIUS = 3;
@@ -135,7 +156,7 @@ function cleanFx(m: Record<string, unknown>): FxMsg | null {
   switch (m.t) {
     case 'shot': {
       const from = V(m.from), to = list(m.to);
-      return from && to && (m.w === 'revolver' || m.w === 'shotgun') ? { t: 'shot', w: m.w, from, to } : null;
+      return from && to && (m.w === 'revolver' || m.w === 'shotgun' || m.w === 'beam') ? { t: 'shot', w: m.w, from, to } : null;
     }
     case 'coin': case 'rocket': case 'core': {
       const p = V(m.p), v = V(m.v);
@@ -162,16 +183,59 @@ export class GameSim {
   enemies = new Map<number, SimEnemy>();
   projectiles = new Map<number, SimProjectile>();
   private events: GameEvent[] = [];
-  private queue: { kind: EnemyKind; at: number; where: 'ground' | 'tower' | 'air' }[] = [];
+  private queue: { kind: EnemyKind; at: number; where: 'ground' | 'tower' | 'air'; el?: Elite }[] = [];
   private nextId = 1;
   private nextAid = 1;
   private rand: () => number;
   private runStart = 0;
   private waveLeft = 0;
   private pickupAt = HEALTH_PICKUPS.map(() => 0); // time each pickup is next available
+  mode: GameMode = 'classic';
+  /** The player who picks gates in a run (the room host; solo: the only player). */
+  hostId = '';
+  private runRand: () => number;
+  private depth = 0;
+  private plan: RoomPlan | null = null;
+  private gates: Gate[] = [];
+  private prize: Reward | null = null;
+  private challenge: Challenge | null = null;
+  private trialEnd = 0;
+  private forgeEnd = 0;
+  private hurtMul = 1; // enemy damage scaling (depth, glass)
 
   constructor(seed = Date.now()) {
     this.rand = rng(seed);
+    this.runRand = rng(seed ^ 0x5eed);
+  }
+
+  private has(p: SimPlayer | undefined, id: string): boolean {
+    return !!p && p.ups.includes(id);
+  }
+
+  /** Style a player can still spend at forges. */
+  bank(p: SimPlayer): number {
+    return Math.max(0, Math.floor(p.stats.style + p.bonus - p.spent));
+  }
+
+  private capMul(p: SimPlayer): number {
+    return (this.has(p, 'g_styleengine') ? VARIANTS.styleEngine.mult : 1) * (this.challenge === 'glass' ? 1.5 : 1);
+  }
+
+  private hitCap(p: SimPlayer, k: unknown): number | undefined {
+    let cap = capOf(HIT_CAP, k);
+    if (cap === undefined) return undefined;
+    if (k === 'shotgun' && this.has(p, 'v_pump')) cap *= VARIANTS.pump.pellets[2] / WEAPONS.shotgun.pellets;
+    return cap * this.capMul(p);
+  }
+
+  private boomCap(p: SimPlayer, k: unknown): { r: number; d: number } | undefined {
+    const c = capOf(BOOM_CAP, k);
+    if (!c) return undefined;
+    let { r, d } = c;
+    if (k === 'core' && this.has(p, 'm_hotcore')) { r = Math.max(r, VARIANTS.hotCore.radius); d = Math.max(d, VARIANTS.hotCore.damage); }
+    if (k === 'rocket' && this.has(p, 'm_cold')) { r *= VARIANTS.freeze.coldMult; d *= VARIANTS.freeze.coldMult; }
+    if (k === 'slam' && this.has(p, 'g_kinetic')) { r *= VARIANTS.kinetic.radiusMul; d = SLAM.baseDamage + VARIANTS.kinetic.perMeter * 40; }
+    return { r: r + 0.1, d: d * this.capMul(p) + 1 };
   }
 
   // ------------------------------------------------------------------ players
@@ -179,7 +243,7 @@ export class GameSim {
   addPlayer(id: string, name: string): void {
     const idx = this.players.size % PLAYER_SPAWNS.length;
     const sp = PLAYER_SPAWNS[idx];
-    const inProgress = this.phase === 'combat' || this.phase === 'intermission';
+    const inProgress = this.phase !== 'lobby' && this.phase !== 'over' && this.phase !== 'victory';
     this.players.set(id, {
       id, name,
       pos: { ...sp }, vel: { x: 0, y: 0, z: 0 },
@@ -192,9 +256,26 @@ export class GameSim {
       healBudget: BLOOD_HEAL_RATE,
       deathPos: { ...sp },
       revive: 0,
+      ups: [],
+      spent: 0,
+      bonus: 0,
+      forge: null,
     });
     this.emit({ t: 'join', pid: id, name });
     if (inProgress) this.emit({ t: 'prespawn', pid: id, p: vv(sp) });
+    const p = this.players.get(id)!;
+    if (this.phase === 'forge') this.openForgeFor(p, false);
+    this.resync();
+  }
+
+  /** Re-announce run state (joins and reconnects): everyone's upgrades, open forges, gates. */
+  resync(): void {
+    if (this.mode !== 'run') return;
+    for (const p of this.players.values()) {
+      this.emit({ t: 'upg', pid: p.id, list: [...p.ups] });
+      if (this.phase === 'forge' && p.forge) this.emitOffers(p);
+    }
+    if (this.phase === 'choice') this.emit({ t: 'gates', gates: this.gates });
   }
 
   removePlayer(id: string): void {
@@ -213,9 +294,17 @@ export class GameSim {
     if (!connected) for (const e of this.enemies.values()) if (e.target === id) e.target = null;
   }
 
-  start(wave = 1): void {
+  start(wave = 1, mode: unknown = 'classic', ups: string[] = []): void {
     if (this.phase !== 'lobby') return;
     this.runStart = this.time;
+    this.mode = mode === 'run' ? 'run' : 'classic';
+    if (this.mode === 'run') {
+      // dev/test: start deeper, or with upgrades already owned
+      for (const p of this.players.values()) for (const u of ups) if (UPGRADE_BY_ID.has(u) && !p.ups.includes(u)) p.ups.push(u);
+      this.resync();
+      this.beginRoom(clamp(Math.floor(num(wave, 1)), 1, FINAL_DEPTH), { reward: 'forge' });
+      return;
+    }
     this.beginIntermission(clamp(Math.floor(num(wave, 1)), 1, WAVES.length), 2.5);
   }
 
@@ -246,13 +335,15 @@ export class GameSim {
     if (!p || !p.alive || !m) return;
     const e = this.enemies.get(num(m.e, -1));
     const k = m.k as HitKind;
-    const cap = capOf(HIT_CAP, k);
+    const cap = this.hitCap(p, k);
     if (!e || e.hp <= 0 || cap === undefined) return;
     const def = ENEMIES[e.kind];
     if (dist(p.pos, e.pos) > HIT_RANGE) return;
-    if (k === 'punch' && dist(p.pos, e.pos) > PUNCH.range + def.radius + 3) return;
+    if ((k === 'punch' || k === 'slide') && dist(p.pos, e.pos) > PUNCH.range + def.radius + 3) return;
+    if (k === 'hammer' && dist(p.pos, e.pos) > VARIANTS.hammer.range + def.radius + 3) return;
+    const armored = e.elite === 'armored';
     // hitscan needs a clear line from the shooter's eye to some part of the target
-    if (k === 'revolver' || k === 'shotgun') {
+    if (k === 'revolver' || k === 'shotgun' || k === 'beam') {
       const eye = { x: p.pos.x, y: p.pos.y + 1.5, z: p.pos.z };
       const mid = { x: e.pos.x, y: e.pos.y + (def.flying ? 0 : def.height * 0.5), z: e.pos.z };
       const head = { x: e.pos.x, y: e.pos.y + (def.flying ? 0 : def.headY), z: e.pos.z };
@@ -264,7 +355,7 @@ export class GameSim {
     // after the strike covers the punch's network trip (and refunds the hit it landed)
     const melee = e.attack === 'swipe' || e.attack === 'smash' || e.attack === 'slash';
     const lateGrace = e.state === 'recover' && melee && this.time - e.lastStrikeT < 0.15;
-    if (k === 'punch' && melee && ((e.state === 'windup' && e.stateT < ENEMY_ATTACKS.husk.parryWindow + 0.1) || lateGrace)) {
+    if ((k === 'punch' || k === 'hammer') && melee && ((e.state === 'windup' && e.stateT < ENEMY_ATTACKS.husk.parryWindow + 0.1) || lateGrace)) {
       if (lateGrace && e.lastStrikeAid) {
         if (p.hurtIds.has(e.lastStrikeAid)) this.healPlayer(p, e.lastStrikeDmg, true);
         else p.hurtIds.add(e.lastStrikeAid);
@@ -275,17 +366,26 @@ export class GameSim {
       this.healPlayer(p, PUNCH.parryHeal, true);
       this.emit({ t: 'mparry', id: e.id, by: id });
       dmg *= 3;
-    } else if ((k === 'revolver' || k === 'ricoshot') && e.state === 'windup' && (e.kind === 'warden' || e.kind === 'drone' || e.kind === 'stalker')) {
+    } else if ((k === 'revolver' || k === 'ricoshot' || k === 'spin' || k === 'beam') && !armored && e.state === 'windup' && (e.kind === 'warden' || e.kind === 'drone' || e.kind === 'stalker')) {
       // a precise shot into a telegraphed ranged attack staggers it
       e.state = 'stun';
       e.stateT = 1.1;
       this.emit({ t: 'stun', id: e.id, by: id });
       dmg *= 1.5;
-    } else if (k === 'shotgun' && dmg >= WEAPONS.shotgun.staggerDamage && e.state === 'windup' && !ENEMIES[e.kind].heavy) {
+    } else if ((k === 'shotgun' || k === 'hammer') && !armored && dmg >= WEAPONS.shotgun.staggerDamage && e.state === 'windup' && !ENEMIES[e.kind].heavy) {
       // a point-blank blast knocks a light enemy out of its attack
       e.state = 'stun';
       e.stateT = 0.7;
       this.emit({ t: 'stun', id: e.id, by: id });
+    }
+    // big hits shove light enemies (overcharged beams, hammer blows)
+    if ((k === 'hammer' || (k === 'beam' && dmg > VARIANTS.beam.damage * 1.2)) && !def.heavy && !armored) {
+      const dx = e.pos.x - p.pos.x, dz = e.pos.z - p.pos.z;
+      const l = Math.hypot(dx, dz) || 1;
+      const f = k === 'hammer' ? VARIANTS.hammer.knock * clamp(dmg / 110, 0.5, 1.5) : VARIANTS.beam.overKnock;
+      e.vel.x += (dx / l) * f;
+      e.vel.z += (dz / l) * f;
+      if (!def.flying) e.vel.y += f * 0.45;
     }
     this.damageEnemy(e, dmg, id, k, hs, p);
   }
@@ -296,12 +396,13 @@ export class GameSim {
     if (!p || !p.alive || !m) return;
     const c = vec(m.p);
     const k = m.k as HitKind;
-    const cap = localFx ? capOf(BOOM_CAP, k) : { r: 4, d: 45 };
-    if (!c || !cap || dist(c, p.pos) > (k === 'slam' ? 8 : 70)) return;
+    const cap = localFx ? this.boomCap(p, k) : { r: 4, d: 45 };
+    if (!c || !cap || dist(c, p.pos) > (k === 'slam' ? 8 : k === 'pump' ? 9 : 70)) return;
     if (localFx) {
       if (p.boomTokens < 1) return;
       p.boomTokens -= 1;
     }
+    let hits = 0;
     const r = clamp(num(m.r), 0, cap.r);
     const base = clamp(num(m.d), 0, cap.d);
     for (const e of this.enemies.values()) {
@@ -313,14 +414,17 @@ export class GameSim {
       const falloff = 1 - (d / Math.max(r, 0.01)) * 0.6;
       // area damage is rate-limited by boom tokens instead of the per-hit budget
       this.damageEnemy(e, base * falloff, id, k, false, p);
-      if (!def.heavy) {
+      hits++;
+      if (!def.heavy && e.elite !== 'armored') {
         const dir = { x: centre.x - c.x, y: 0, z: centre.z - c.z };
         const l = Math.hypot(dir.x, dir.z) || 1;
         e.vel.x += (dir.x / l) * 12 * falloff;
         e.vel.z += (dir.z / l) * 12 * falloff;
         if (!def.flying) e.vel.y += 7 * falloff;
+        if (k === 'slam' && this.has(p, 'g_kinetic')) e.vel.y += VARIANTS.kinetic.launch * falloff;
       }
     }
+    if (k === 'slam' && hits > 0 && this.has(p, 'g_rebound')) this.healPlayer(p, VARIANTS.rebound.heal, false);
     this.emit({ t: 'boom', p: vv(c), r, d: 0, hostile: false, aid: 0, k, by: localFx ? id : undefined });
   }
 
@@ -370,7 +474,7 @@ export class GameSim {
     p.hp -= dmg;
     // part of every hit stays "hard": it can't be healed back until it decays
     p.hard = Math.min(PLAYER.maxHealth - Math.max(0, p.hp), p.hard + dmg * PLAYER.hardDamageFraction);
-    p.hardT = PLAYER.hardDamageDelay;
+    p.hardT = PLAYER.hardDamageDelay * (this.has(p, 'g_ironhide') ? 0.5 : 1);
     p.stats.taken += dmg;
     this.emit({ t: 'phurt', pid: id, d: r2(dmg), hp: r2(Math.max(0, p.hp)), hard: r2(p.hard), src });
     if (p.hp <= 0) {
@@ -394,6 +498,8 @@ export class GameSim {
   }
 
   retry(): void {
+    if (this.phase !== 'over' && this.phase !== 'victory') return;
+    if (this.mode === 'run') { this.newRun(); return; }
     if (this.phase !== 'over') return;
     this.enemies.clear();
     this.projectiles.clear();
@@ -420,25 +526,26 @@ export class GameSim {
     this.updatePhase(dt);
     for (const p of this.players.values()) {
       p.budget = Math.min(BUDGET_MAX, p.budget + BUDGET_REFILL * dt);
-      p.boomTokens = Math.min(BOOM_TOKENS, p.boomTokens + BOOM_REFILL * dt);
+      const cluster = this.has(p, 'm_cluster');
+      p.boomTokens = Math.min(cluster ? CLUSTER_TOKENS : BOOM_TOKENS, p.boomTokens + (cluster ? CLUSTER_REFILL : BOOM_REFILL) * dt);
       p.healBudget = Math.min(BLOOD_HEAL_RATE, p.healBudget + BLOOD_HEAL_RATE * dt);
       // co-op revive: a living partner standing on your corpse brings you back early
       if (!p.alive && p.respawnAt > 0 && this.phase !== 'over' && this.phase !== 'victory') {
-        let helping = false;
+        let helping = 0;
         for (const o of this.players.values()) {
-          if (o !== p && o.alive && o.connected && dist(o.pos, p.deathPos) < REVIVE_RADIUS) helping = true;
+          if (o !== p && o.alive && o.connected && dist(o.pos, p.deathPos) < REVIVE_RADIUS) helping = Math.max(helping, this.has(o, 'c_rally') ? VARIANTS.rally.speed : 1);
         }
-        p.revive = helping ? p.revive + dt : Math.max(0, p.revive - dt * 0.5);
+        p.revive = helping ? p.revive + dt * helping : Math.max(0, p.revive - dt * 0.5);
         if (p.revive >= REVIVE_TIME) {
           const by = [...this.players.values()].find((o) => o !== p && o.alive && dist(o.pos, p.deathPos) < REVIVE_RADIUS);
-          this.respawn(p, p.deathPos, 50);
+          this.respawn(p, p.deathPos, this.has(by, 'c_rally') ? VARIANTS.rally.hp : 50);
           this.emit({ t: 'revive', pid: p.id, by: by?.id ?? '' });
           continue;
         }
       }
       if (p.hard > 0) {
         p.hardT -= dt;
-        if (p.hardT <= 0) p.hard = Math.max(0, p.hard - PLAYER.hardDamageDecay * dt);
+        if (p.hardT <= 0) p.hard = Math.max(0, p.hard - PLAYER.hardDamageDecay * (this.has(p, 'g_ironhide') ? 2 : 1) * dt);
       }
       if (!p.alive && this.phase !== 'over' && this.phase !== 'victory' && this.time >= p.respawnAt && p.respawnAt > 0) this.respawn(p);
     }
@@ -476,15 +583,24 @@ export class GameSim {
 
   snapshot(): Snapshot {
     const e = [...this.enemies.values()].map(
-      (x) => [x.id, ENEMY_KINDS.indexOf(x.kind), r2(x.pos.x), r2(x.pos.y), r2(x.pos.z), r2(x.yaw), ENEMY_STATES.indexOf(x.state), Math.ceil(x.hp)] as Snapshot['e'][number],
+      (x) => [x.id, ENEMY_KINDS.indexOf(x.kind), r2(x.pos.x), r2(x.pos.y), r2(x.pos.z), r2(x.yaw), ENEMY_STATES.indexOf(x.state), Math.ceil(x.hp), x.elite ? ELITE_KINDS.indexOf(x.elite) + 1 : 0] as Snapshot['e'][number],
     );
     const pr = [...this.projectiles.values()].map(
       (x) => [x.id, PROJ_KINDS.indexOf(x.kind), r2(x.pos.x), r2(x.pos.y), r2(x.pos.z), r2(x.vel.x), r2(x.vel.y), r2(x.vel.z), x.kind === 'reflected' ? 1 : 0] as Snapshot['pr'][number],
     );
     const pl = [...this.players.values()].map(
-      (p) => [p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.vel.x), r2(p.vel.y), r2(p.vel.z), r2(p.yaw), r2(p.pitch), p.flags, p.weapon, Math.ceil(p.hp), p.alive ? 1 : 0, Math.floor(p.hard), p.connected ? 1 : 0, r2(p.revive / REVIVE_TIME), r2(p.deathPos.x), r2(p.deathPos.y), r2(p.deathPos.z)] as PlayerSnap,
+      (p) => [p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.vel.x), r2(p.vel.y), r2(p.vel.z), r2(p.yaw), r2(p.pitch), p.flags, p.weapon, Math.ceil(p.hp), p.alive ? 1 : 0, Math.floor(p.hard), p.connected ? 1 : 0, r2(p.revive / REVIVE_TIME), r2(p.deathPos.x), r2(p.deathPos.y), r2(p.deathPos.z), this.bank(p)] as PlayerSnap,
     );
-    return { t: r2(this.time), e, pr, pl, wave: this.wave, phase: this.phase, left: this.waveLeft, timer: r2(this.phaseTimer), pk: this.pickupMask() };
+    const snap: Snapshot = { t: r2(this.time), e, pr, pl, wave: this.wave, phase: this.phase, left: this.waveLeft, timer: r2(this.phaseTimer), pk: this.pickupMask(), mode: this.mode };
+    if (this.mode === 'run') {
+      const run: RunSnap = { d: this.depth };
+      if (this.phase === 'choice') run.g = this.gates;
+      if (this.prize) run.prize = this.prize;
+      if (this.challenge) run.ch = this.challenge;
+      if (this.challenge === 'timetrial' && this.phase === 'combat') run.tl = r2(Math.max(0, this.trialEnd - this.time));
+      snap.run = run;
+    }
+    return snap;
   }
 
   private pickupMask(): number {
@@ -502,36 +618,55 @@ export class GameSim {
   }
 
   private startWave(n: number): void {
-    const def = WAVES[n - 1];
+    const plan = this.mode === 'run' ? this.plan : null;
+    const def: WaveDef = plan ?? WAVES[n - 1];
     this.phase = 'combat';
     this.wave = n;
     const coop = Math.max(1, this.connectedCount());
     this.queue = [];
     for (const g of def.groups) {
       const count = g.kind === 'colossus' || g.kind === 'brute' ? g.count : Math.round(g.count * (1 + 0.5 * (coop - 1)));
-      for (let i = 0; i < count; i++) this.queue.push({ kind: g.kind, at: this.time + g.delay + i * 0.45, where: g.where });
+      for (let i = 0; i < count; i++) {
+        // elite rooms: a share of the light enemies carry an affix
+        const el = plan?.elite && !ENEMIES[g.kind].heavy && this.runRand() < RUN.eliteShare ? ELITES[Math.floor(this.runRand() * ELITES.length)] : undefined;
+        this.queue.push({ kind: g.kind, at: this.time + g.delay + i * 0.45, where: g.where, el });
+      }
     }
     this.queue.sort((a, b) => a.at - b.at);
     this.waveLeft = this.queue.length;
-    this.emit({ t: 'wave', n, total: WAVES.length, title: def.title, boss: !!def.boss });
+    if (plan) {
+      if (this.challenge === 'timetrial') this.trialEnd = this.time + RUN.timeTrial;
+      this.emit({
+        t: 'room', d: n, layer: RUN.layers[layerOf(n)].name, title: plan.title, boss: plan.boss, elite: plan.elite,
+        ch: this.challenge ?? undefined, prize: this.prize ?? undefined,
+      });
+    } else this.emit({ t: 'wave', n, total: WAVES.length, title: def.title, boss: !!def.boss });
   }
 
   private updatePhase(dt: number): void {
+    if (this.phase === 'choice') this.updateChoice();
+    else if (this.phase === 'forge') {
+      this.phaseTimer = Math.max(0, this.forgeEnd - this.time);
+      if (this.time >= this.forgeEnd) this.closeForge();
+    }
     if (this.phase === 'intermission') {
       this.phaseTimer -= dt;
       if (this.phaseTimer <= 0) this.startWave(this.wave);
     } else if (this.phase === 'combat') {
       let alive = 0;
       for (const e of this.enemies.values()) if (e.hp > 0) alive++;
-      const cap = this.wave > 4 ? MAX_ALIVE + 4 : MAX_ALIVE;
+      const cap = this.wave > (this.mode === 'run' ? 8 : 4) ? MAX_ALIVE + 4 : MAX_ALIVE;
       while (this.queue.length && this.queue[0].at <= this.time && alive < cap) {
         const q = this.queue.shift()!;
-        this.spawnEnemy(q.kind, q.where);
+        this.spawnEnemy(q.kind, q.where, q.el);
         alive++;
       }
       // if the arena is empty, pull the next group forward so pacing never stalls
       if (alive === 0 && this.queue.length) this.queue[0].at = Math.min(this.queue[0].at, this.time + 0.6);
-      if (alive === 0 && this.queue.length === 0) {
+      if (alive === 0 && this.queue.length === 0 && this.mode === 'run') {
+        this.emit({ t: 'clear', n: this.wave });
+        this.roomCleared();
+      } else if (alive === 0 && this.queue.length === 0) {
         this.emit({ t: 'clear', n: this.wave });
         if (this.wave >= WAVES.length) this.finish(true);
         else {
@@ -542,17 +677,229 @@ export class GameSim {
     }
   }
 
+  // --------------------------------------------------------------------- run
+
+  /** Set up the room at `depth` behind the chosen gate, then count down into it. */
+  private beginRoom(depth: number, gate: Gate): void {
+    this.depth = depth;
+    this.prize = gate.reward;
+    this.challenge = gate.challenge ?? null;
+    this.gates = [];
+    const elite = gate.reward === 'elite';
+    this.plan = planRoom(depth, this.runRand, elite, gate.reward === 'challenge' ? 1.15 : 1);
+    this.hurtMul = enemyScale(depth).dmg * (this.challenge === 'glass' ? 1.5 : 1);
+    this.pickupAt.fill(0);
+    this.beginIntermission(depth, depth === 1 ? 2.5 : 3);
+  }
+
+  /** Room cleared: pay out the gate's prize, then open a forge or the next gates. */
+  private roomCleared(): void {
+    for (const p of this.players.values()) if (!p.alive) this.respawn(p);
+    const boss = isBossDepth(this.depth);
+    if (boss && this.depth >= FINAL_DEPTH) { this.finish(true); return; }
+    const prize = this.prize;
+    const failed = this.challenge === 'timetrial' && this.time > this.trialEnd;
+    this.challenge = null;
+    this.hurtMul = enemyScale(this.depth).dmg;
+    if (boss) {
+      // a layer boss always pays a full repair and a rare forge
+      this.repairAll();
+      this.emit({ t: 'prize', k: 'repair', ok: true });
+      this.openForge(true);
+      return;
+    }
+    if (!prize || failed) {
+      if (prize) this.emit({ t: 'prize', k: prize, ok: false });
+      this.openChoice();
+      return;
+    }
+    if (prize === 'repair') this.repairAll();
+    if (prize === 'cache' || prize === 'challenge') {
+      const amt = Math.round((RUN.cacheBase + RUN.cachePerDepth * this.depth) * (prize === 'challenge' ? 0.6 : 1));
+      for (const p of this.players.values()) p.bonus += amt;
+      this.emit({ t: 'prize', k: prize, ok: true, amt });
+    } else this.emit({ t: 'prize', k: prize, ok: true });
+    if (prize === 'forge' || prize === 'elite' || prize === 'challenge') this.openForge(prize !== 'forge');
+    else this.openChoice();
+  }
+
+  private repairAll(): void {
+    for (const p of this.players.values()) {
+      if (!p.alive) continue;
+      p.hard = 0;
+      const before = p.hp;
+      p.hp = PLAYER.maxHealth;
+      this.emit({ t: 'heal', pid: p.id, hp: p.hp, amt: r2(p.hp - before), hard: 0 });
+    }
+  }
+
+  private openChoice(): void {
+    this.prize = null;
+    this.gates = planGates(this.depth + 1, this.runRand);
+    this.phase = 'choice';
+    this.phaseTimer = 0;
+    this.emit({ t: 'gates', gates: this.gates });
+  }
+
+  /** The host walks into a gate to pick it (anyone may if the host is gone). */
+  private updateChoice(): void {
+    const host = this.players.get(this.hostId);
+    const pickers = host && host.connected && host.alive ? [host] : [...this.players.values()].filter((p) => p.connected && p.alive);
+    for (const p of pickers) {
+      for (let i = 0; i < this.gates.length; i++) {
+        const g = GATE_SPOTS[i];
+        if (distXZ(p.pos, g) < GATE_RADIUS && p.pos.y < g.y + 3) {
+          this.emit({ t: 'gate', i, by: p.id });
+          this.beginRoom(this.depth + 1, this.gates[i]);
+          return;
+        }
+      }
+    }
+  }
+
+  private openForge(rare: boolean): void {
+    this.phase = 'forge';
+    this.forgeEnd = this.time + RUN.forgeTimeout;
+    for (const p of this.players.values()) this.openForgeFor(p, rare);
+  }
+
+  private openForgeFor(p: SimPlayer, rare: boolean): void {
+    p.forge = { offers: [], free: true, buys: 0, rerolls: 0, done: false, rare };
+    p.forge.offers = this.makeOffers(p, rare ? 4 : 3);
+    this.emitOffers(p);
+  }
+
+  /** Draw distinct upgrades this player can take; weapon variants are favoured early. */
+  private makeOffers(p: SimPlayer, n: number): string[] {
+    const coop = this.players.size > 1;
+    const pool = UPGRADES.filter((u) => eligible(u, p.ups, coop));
+    const out: string[] = [];
+    while (out.length < n && pool.length) {
+      let total = 0;
+      const w = pool.map((u) => {
+        let x = u.rare ? 0.5 : 1;
+        if (u.cat === 'variant') x *= this.depth <= 7 ? 1.6 : 1.1;
+        if (u.cat === 'mod') x *= 1.3; // a mod is only here because you own what it improves
+        if (u.coop) x *= 1.4;
+        total += x;
+        return x;
+      });
+      let r = this.runRand() * total;
+      let i = 0;
+      for (; i < pool.length - 1; i++) { r -= w[i]; if (r <= 0) break; }
+      out.push(pool[i].id);
+      pool.splice(i, 1);
+    }
+    return out;
+  }
+
+  private buyCost(p: SimPlayer): number {
+    return RUN.forgeBuyBase + RUN.forgeBuyPerDepth * this.depth + RUN.forgeBuyStep * (p.forge?.buys ?? 0);
+  }
+
+  private rerollCost(p: SimPlayer): number {
+    return (RUN.forgeRerollBase + RUN.forgeRerollPerDepth * this.depth) * (1 + (p.forge?.rerolls ?? 0));
+  }
+
+  private emitOffers(p: SimPlayer): void {
+    const f = p.forge;
+    if (!f) return;
+    this.emit({ t: 'offers', pid: p.id, offers: [...f.offers], free: f.free, buy: this.buyCost(p), reroll: this.rerollCost(p), rare: f.rare });
+  }
+
+  private grant(p: SimPlayer, id: string): void {
+    if (p.ups.includes(id)) return;
+    p.ups.push(id);
+    this.emit({ t: 'forged', pid: p.id, id });
+    this.emit({ t: 'upg', pid: p.id, list: [...p.ups] });
+  }
+
+  playerForge(id: string, raw: unknown): void {
+    const p = this.players.get(id);
+    const m = obj(raw);
+    if (!p || !m || this.phase !== 'forge' || !p.forge || p.forge.done) return;
+    const f = p.forge;
+    const i = Math.floor(num(m.i, -1));
+    const offer = i >= 0 && i < f.offers.length ? f.offers[i] : undefined;
+    const coop = this.players.size > 1;
+    switch (m.a) {
+      case 'pick':
+        if (!f.free || !offer) return;
+        f.free = false;
+        this.grant(p, offer);
+        f.offers.splice(i, 1);
+        break;
+      case 'buy': {
+        if (f.free || !offer) return;
+        const cost = this.buyCost(p);
+        if (this.bank(p) < cost) return;
+        p.spent += cost;
+        f.buys++;
+        this.grant(p, offer);
+        f.offers.splice(i, 1);
+        break;
+      }
+      case 'reroll': {
+        const cost = this.rerollCost(p);
+        if (this.bank(p) < cost) return;
+        p.spent += cost;
+        f.rerolls++;
+        f.offers = this.makeOffers(p, f.rare ? 4 : 3);
+        break;
+      }
+      case 'done':
+        f.done = true;
+        this.emit({ t: 'forgedone', pid: p.id });
+        break;
+      default:
+        return;
+    }
+    // offers bought out from under an upgrade's requirement (or now ineligible) drop out
+    f.offers = f.offers.filter((o) => { const u = UPGRADE_BY_ID.get(o); return !!u && eligible(u, p.ups, coop); });
+    this.emitOffers(p);
+    if ([...this.players.values()].every((o) => !o.connected || !o.forge || o.forge.done)) this.closeForge();
+  }
+
+  private closeForge(): void {
+    for (const p of this.players.values()) p.forge = null;
+    if (this.phase === 'forge') this.openChoice();
+  }
+
+  /** Start over from room 1 with the same players (after a death or a win). */
+  private newRun(): void {
+    this.enemies.clear();
+    this.projectiles.clear();
+    this.queue = [];
+    let i = 0;
+    for (const p of this.players.values()) {
+      const sp = PLAYER_SPAWNS[i++ % PLAYER_SPAWNS.length];
+      Object.assign(p, {
+        pos: { ...sp }, vel: { x: 0, y: 0, z: 0 }, hp: PLAYER.maxHealth, hard: 0, alive: true, respawnAt: 0, revive: 0,
+        ups: [], spent: 0, bonus: 0, forge: null,
+        stats: { id: p.id, name: p.name, kills: 0, damage: 0, deaths: 0, taken: 0, style: 0, parries: 0 },
+      });
+      this.emit({ t: 'prespawn', pid: p.id, p: vv(sp) });
+      this.emit({ t: 'upg', pid: p.id, list: [] });
+    }
+    this.pickupAt.fill(0);
+    this.runStart = this.time;
+    this.emit({ t: 'reset', wave: 1 });
+    this.beginRoom(1, { reward: 'forge' });
+  }
+
   private finish(win: boolean): void {
     this.phase = win ? 'victory' : 'over';
     this.projectiles.clear();
     this.emit({
       t: 'over', win, wave: this.wave, time: r2(this.time - this.runStart),
       stats: [...this.players.values()].map((p) => ({ ...p.stats, damage: Math.round(p.stats.damage), taken: Math.round(p.stats.taken) })),
+      mode: this.mode,
+      ups: this.mode === 'run' ? Object.fromEntries([...this.players.values()].map((p) => [p.id, [...p.ups]])) : undefined,
     });
   }
 
   private checkDefeat(): void {
-    if (this.phase !== 'combat' && this.phase !== 'intermission') return;
+    if (this.phase !== 'combat' && this.phase !== 'intermission' && this.phase !== 'choice' && this.phase !== 'forge') return;
     if (this.players.size === 0) return;
     for (const p of this.players.values()) if (p.alive && p.connected) return;
     this.finish(false);
@@ -577,7 +924,7 @@ export class GameSim {
     return n;
   }
 
-  private spawnEnemy(kind: EnemyKind, where: 'ground' | 'tower' | 'air'): void {
+  private spawnEnemy(kind: EnemyKind, where: 'ground' | 'tower' | 'air', el?: Elite): void {
     const def = ENEMIES[kind];
     const list = kind === 'colossus' ? [{ x: 0, y: 0, z: -24 }] : where === 'tower' ? TOWER_SPAWNS : where === 'air' ? AIR_SPAWNS : GROUND_SPAWNS;
     // prefer spawn points away from players
@@ -592,16 +939,23 @@ export class GameSim {
     const jitter = kind === 'colossus' ? 0 : 2.5;
     const pos = { x: best.x + (this.rand() - 0.5) * jitter, y: best.y, z: best.z + (this.rand() - 0.5) * jitter };
     const coopHp = (kind === 'colossus' || kind === 'brute') && this.connectedCount() > 1 ? 1.5 : 1;
+    let runHp = 1;
+    if (this.mode === 'run') {
+      runHp = enemyScale(this.depth).hp * (el === 'armored' ? 1.8 : 1);
+      if (kind === 'colossus') runHp *= RUN.bossHp[layerOf(this.depth)];
+    }
+    const hp = def.hp * coopHp * runHp;
     const e: SimEnemy = {
       id: this.nextId++, kind, pos, vel: { x: 0, y: 0, z: 0 }, yaw: Math.atan2(pos.x, pos.z),
-      hp: def.hp * coopHp, maxHp: def.hp * coopHp, state: 'spawn', stateT: kind === 'colossus' ? 2.5 : 0.9,
+      elite: el ?? null, spdMul: el === 'swift' ? 1.4 : 1,
+      hp, maxHp: hp, state: 'spawn', stateT: kind === 'colossus' ? 2.5 : 0.9,
       target: null, retargetT: 0, cooldown: 1 + this.rand() * 1.5, attack: '', grounded: false,
       burstLeft: 0, strafeDir: this.rand() < 0.5 ? -1 : 1, phase: 1,
       summonT: ENEMY_ATTACKS.colossus.summonEvery, cycle: 0, shots: 0,
       lastStrikeT: -9, lastStrikeAid: 0, lastStrikeDmg: 0, invulnT: 0, blinkCd: 2 + this.rand() * 2,
     };
     this.enemies.set(e.id, e);
-    this.emit({ t: 'spawn', id: e.id, k: kind, p: vv(pos) });
+    this.emit({ t: 'spawn', id: e.id, k: kind, p: vv(pos), el: el ?? undefined });
   }
 
   // ------------------------------------------------------------------ damage
@@ -618,11 +972,18 @@ export class GameSim {
     p.stats.damage += dealt;
     // blood heals the aggressive: damage dealt up close restores (soft) health,
     // rate-limited, and armoured heavies bleed less
-    if (p.alive && dist(p.pos, e.pos) < PLAYER.bloodHealRange + ENEMIES[e.kind].radius) {
-      const want = dealt * PLAYER.bloodHealFactor * (ENEMIES[e.kind].heavy ? 0.5 : 1);
+    const thirst = this.has(p, 'g_bloodthirst');
+    const range = PLAYER.bloodHealRange * (thirst ? VARIANTS.bloodthirst.range : 1);
+    if (p.alive && this.challenge !== 'bloodless' && dist(p.pos, e.pos) < range + ENEMIES[e.kind].radius) {
+      const want = dealt * PLAYER.bloodHealFactor * (ENEMIES[e.kind].heavy ? 0.5 : 1) * (thirst ? VARIANTS.bloodthirst.factor : 1);
       const amt = Math.min(want, p.healBudget);
       p.healBudget -= amt;
       this.healPlayer(p, amt, false);
+      if (this.has(p, 'c_tether')) {
+        for (const o of this.players.values()) {
+          if (o !== p && o.alive && dist(o.pos, p.pos) < VARIANTS.tether.range) this.healPlayer(o, amt * VARIANTS.tether.share, false);
+        }
+      }
     }
     this.emit({ t: 'dmg', id: e.id, d: r2(dealt), by, hs, k: how, p: vv(e.pos) });
     if (e.kind === 'colossus') {
@@ -640,6 +1001,10 @@ export class GameSim {
       this.enemies.delete(e.id);
       this.waveLeft = Math.max(0, this.waveLeft - 1);
       this.emit({ t: 'kill', id: e.id, k: e.kind, by, how, p: vv(e.pos), hs });
+      // volatile elites burst when they die: don't finish them off in your own face
+      if (e.elite === 'volatile') {
+        this.emit({ t: 'boom', p: vv({ x: e.pos.x, y: e.pos.y + 1, z: e.pos.z }), r: 3.4, d: r2(22 * this.hurtMul), hostile: true, aid: this.aid(), k: 'volatile' });
+      }
     }
   }
 
@@ -720,6 +1085,8 @@ export class GameSim {
   /** Ground locomotion with separation + wall sliding. wishX/wishZ is desired velocity. */
   private physics(e: SimEnemy, dt: number, wishX: number, wishZ: number, accel = 30): void {
     const def = ENEMIES[e.kind];
+    wishX *= e.spdMul;
+    wishZ *= e.spdMul;
     for (const o of this.enemies.values()) {
       if (o === e) continue;
       const dx = e.pos.x - o.pos.x, dz = e.pos.z - o.pos.z;
@@ -818,7 +1185,7 @@ export class GameSim {
     e.lastStrikeT = this.time;
     e.lastStrikeAid = aid;
     e.lastStrikeDmg = d;
-    this.emit({ t: 'melee', id: e.id, aid, p: vv(hit), r, d });
+    this.emit({ t: 'melee', id: e.id, aid, p: vv(hit), r, d: r2(d * this.hurtMul) });
   }
 
   /** Stalker: a fast flanker that blinks behind its target and slashes. Interrupt or dash. */
@@ -909,7 +1276,7 @@ export class GameSim {
         for (const p of this.players.values()) {
           if (!p.alive) continue;
           if (dist({ x: p.pos.x, y: p.pos.y + 1, z: p.pos.z }, e.pos) < a.range + 0.6) {
-            this.emit({ t: 'melee', id: e.id, aid: this.aid(), p: vv(e.pos), r: 2.4, d: a.damage });
+            this.emit({ t: 'melee', id: e.id, aid: this.aid(), p: vv(e.pos), r: 2.4, d: r2(a.damage * this.hurtMul) });
             this.emit({ t: 'boom', p: vv(e.pos), r: 2.4, d: 0, hostile: false, aid: 0, k: 'eye' });
             e.hp = 0;
             this.enemies.delete(e.id);
@@ -1069,10 +1436,10 @@ export class GameSim {
       e.lastStrikeT = this.time;
       e.lastStrikeAid = aid;
       e.lastStrikeDmg = a.meleeDamage;
-      this.emit({ t: 'melee', id: e.id, aid, p: vv(p), r: 2.6 * sizeMul, d: a.meleeDamage });
+      this.emit({ t: 'melee', id: e.id, aid, p: vv(p), r: 2.6 * sizeMul, d: r2(a.meleeDamage * this.hurtMul) });
       this.emit({ t: 'boom', p: vv({ x: p.x, y: e.pos.y, z: p.z }), r: 2, d: 0, hostile: false, aid: 0, k: 'dust' });
     } else if (attack === 'stomp') {
-      this.emit({ t: 'shock', id: e.id, aid: this.aid(), p: vv(e.pos), speed: a.waveSpeed * (sizeMul > 1 ? 1.2 : 1), range: a.waveRange * sizeMul, d: a.stompDamage });
+      this.emit({ t: 'shock', id: e.id, aid: this.aid(), p: vv(e.pos), speed: a.waveSpeed * (sizeMul > 1 ? 1.2 : 1), range: a.waveRange * sizeMul, d: r2(a.stompDamage * this.hurtMul) });
     } else if (attack === 'mortar') {
       for (let i = 0; i < mortars; i++) {
         const T = 1.25 + i * 0.15;
@@ -1138,7 +1505,7 @@ export class GameSim {
             const dir = this.rand() < 0.5 ? 1 : -1;
             const sweep = c.beamSweep * dir * (e.phase === 3 ? 1.6 : 1);
             const dur = c.beamTime * (e.phase === 3 ? 1.3 : 1);
-            this.emit({ t: 'beam', id: e.id, aid: this.aid(), p: vv(head), yaw0: r2(yawTo - sweep / 2), sweep: r2(sweep), pitch: r2(pitch), dur, dps: c.beamDps });
+            this.emit({ t: 'beam', id: e.id, aid: this.aid(), p: vv(head), yaw0: r2(yawTo - sweep / 2), sweep: r2(sweep), pitch: r2(pitch), dur, dps: r2(c.beamDps * this.hurtMul) });
             this.setState(e, 'beam', dur);
           } else if (e.attack === 'ring') {
             // a parryable ring of orbs: jump it, dash it, or punch one back
@@ -1181,7 +1548,7 @@ export class GameSim {
 
   private spawnProjectile(kind: ProjectileKind, from: Vec3, vel: Vec3, damage: number, e: SimEnemy): void {
     const id = this.nextId++;
-    this.projectiles.set(id, { id, kind, pos: { ...from }, vel, damage, born: this.time, owner: String(e.id) });
+    this.projectiles.set(id, { id, kind, pos: { ...from }, vel, damage: damage * this.hurtMul, born: this.time, owner: String(e.id) });
   }
 
   private updateProjectile(pr: SimProjectile, dt: number): void {

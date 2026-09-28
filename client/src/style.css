@@ -303,11 +303,16 @@ label.small {
   font-weight: normal;
 }
 
+/* room codes use a plain monospace face: the display font makes letters like M/N and 8/B hard to tell apart */
+.code,
+input#code {
+  font-family: 'Cascadia Mono', Consolas, 'DejaVu Sans Mono', Menlo, ui-monospace, monospace;
+  font-weight: 700;
+}
 .code {
-  font-family: 'Future', sans-serif;
   font-size: 64px;
   color: #fff;
-  letter-spacing: 0.35em;
+  letter-spacing: 0.3em;
   text-shadow: 0 0 20px rgba(255, 60, 30, 0.5);
   margin: 6px 0;
 }
@@ -821,4 +826,188 @@ label.small {
   letter-spacing: 0.2em;
   color: #fff;
   pointer-events: none;
+}
+.code-inline {
+  font-family: 'Cascadia Mono', Consolas, 'DejaVu Sans Mono', Menlo, ui-monospace, monospace;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.15em;
+}
+
+/* ------------------------------------------------------------ runs */
+button small {
+  display: block;
+  font-family: 'Pixel', monospace;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  color: var(--steel-dim);
+  margin-top: 3px;
+}
+.best {
+  font-family: 'Pixel', monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: #ffb070;
+  margin-top: 6px;
+}
+.seg {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 14px;
+}
+.seg button {
+  min-width: 130px;
+  text-align: center;
+}
+.seg button.on {
+  border-left-color: var(--red);
+  color: #fff;
+  background: linear-gradient(90deg, rgba(90, 14, 10, 0.95), rgba(26, 10, 10, 0.85));
+}
+.seg button:disabled.on {
+  opacity: 1;
+}
+.variant {
+  font-family: 'Pixel', monospace;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  color: #ffb070;
+  min-height: 13px;
+  text-shadow: 2px 2px 0 #000;
+}
+.impact {
+  font-family: 'Pixel', monospace;
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  text-shadow: 2px 2px 0 #000;
+  color: #9aa0ac;
+}
+.impact.tier1 {
+  color: #ffd060;
+}
+.impact.tier2 {
+  color: #ff5a2a;
+  text-shadow: 2px 2px 0 #000, 0 0 10px rgba(255, 90, 40, 0.9);
+}
+.bank {
+  font-family: 'Pixel', monospace;
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  color: #9fd8ff;
+  text-shadow: 2px 2px 0 #000;
+  margin-bottom: 8px;
+}
+.hud-toast {
+  position: absolute;
+  top: 62%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: 'Pixel', monospace;
+  font-size: 15px;
+  letter-spacing: 0.3em;
+  color: #ffb070;
+  text-shadow: 2px 2px 0 #000;
+  opacity: 0;
+}
+.trial {
+  font-family: 'Pixel', monospace;
+  font-size: 15px;
+  color: #ffe040;
+}
+.trial.urgent {
+  color: #ff4030;
+  animation: flicker 0.5s infinite steps(1);
+}
+.forge {
+  width: min(980px, 94vw);
+}
+.forge-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: 'Pixel', monospace;
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  color: var(--steel-dim);
+  margin: -6px 0 14px;
+}
+.bank-big {
+  font-size: 18px;
+  color: #9fd8ff;
+}
+.bank-big b {
+  font-weight: normal;
+  color: #fff;
+}
+.forge-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 190px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--edge);
+  border-top: 1px solid #2a2c33;
+  text-align: left;
+}
+.card .tag {
+  font-family: 'Pixel', monospace;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--steel-dim);
+}
+.card .name {
+  font-size: 19px;
+  letter-spacing: 0.1em;
+  color: #fff;
+}
+.card .desc {
+  font-family: 'Pixel', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  letter-spacing: 0.04em;
+  color: #c0c3cc;
+  flex: 1;
+}
+.card .act {
+  font-family: 'Pixel', monospace;
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  color: #ffb070;
+}
+.card.cat-variant { border-left-color: #ff8a2a; }
+.card.cat-mod { border-left-color: #ffd060; }
+.card.cat-move { border-left-color: #45c8ff; }
+.card.cat-blood { border-left-color: #ff3050; }
+.card.cat-coop { border-left-color: #7dffb0; }
+.card:hover:not(:disabled) {
+  transform: translateY(-4px);
+}
+.forge-actions {
+  justify-content: space-between;
+  margin-top: 14px;
+}
+.forge .owned {
+  text-align: left;
+  max-width: none;
+  margin-top: 8px;
+}
+.builds {
+  font-family: 'Pixel', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #c0c3cc;
+  margin: 10px 0 14px;
+  max-width: 620px;
+}
+.builds b {
+  color: #fff;
+  font-weight: normal;
+  margin-right: 8px;
 }
