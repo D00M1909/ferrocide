@@ -150,9 +150,10 @@ function mainMenu(error = ''): void {
     </div>
     <div class="menu-right">
       <h3>FIELD NOTES</h3>
-      Blood is fuel: damage dealt up close <b>heals</b> you — but part of every hit stays as hard damage for a moment.<br>
-      <b>Yellow</b> means parryable: punch orbs, bolts and mortars back with F, or punch a husk mid-swing.<br>
-      Toss a coin, then shoot it. Shoot your own shotgun core. Switch weapons — stale kills are worth less.
+      <p><span class="k">BLOOD IS FUEL.</span> Hurting enemies up close heals you. Part of each hit you take lingers before it can heal.</p>
+      <p><span class="k">PARRY <b>YELLOW</b>.</span> Punch (F) glowing orbs, bolts and mortars straight back, or punch a husk mid-swing.</p>
+      <p><span class="k">STYLE PAYS.</span> Toss a coin, then shoot it. Shoot your own shotgun core. Rotate weapons: repeat kills score less.</p>
+      <p><span class="k">RED CRYSTALS</span> restore health, but respawn slowly.</p>
     </div>
   `, 'menu-layout');
   show(el);
@@ -266,9 +267,20 @@ async function startOnline(mode: 'host' | 'join', code = ''): Promise<void> {
   if (mode === 'join' && code.trim().length !== 4) { mainMenu('Enter the 4-letter room code your partner sees.'); return; }
   show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
   let res: { link: ColyseusLink; welcome: WelcomeMsg };
+  let wake: HTMLElement | null = null;
   const awake = await wakeServer((s) => {
-    screen?.querySelector('.loading')?.replaceChildren(`WAKING THE CO-OP SERVER… ${s}s`, h('<div class="hint">The free server naps when nobody is playing. First connection can take up to a minute.</div>'));
+    if (!wake) {
+      wake = h(`
+        <div class="loading">WAKING THE CO-OP SERVER</div>
+        <div class="wake-bar"><i></i></div>
+        <div class="wake-time"></div>
+        <div class="hint">The server sleeps when nobody is playing, so the first match takes up to a minute to start.<br>Solo is always instant.</div>`);
+      show(wake);
+    }
+    (wake.querySelector('.wake-bar i') as HTMLElement).style.width = `${Math.min(100, (s / 60) * 100)}%`;
+    wake.querySelector('.wake-time')!.textContent = `0:${String(s).padStart(2, '0')}`;
   });
+  if (wake) show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
   if (!awake) { mainMenu('The co-op server did not wake up. Try again in a minute (solo always works).'); return; }
   try {
     res = await ColyseusLink.connect(mode, settings.name || 'SLAYER', code);
