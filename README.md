@@ -1,7 +1,7 @@
 # FERROCIDE
 
 A fast, retro PS1-style arena shooter for the browser, inspired by ULTRAKILL, with **2-player online co-op**.
-Blood is fuel: you heal by hurting things up close. Prefer range? Red health crystals are scattered around the arena (small ones on the ground, big ones on the wall catwalks).
+Blood is fuel: you heal by hurting things up close. Prefer range? Red health crystals are scattered around the arena (small ones on the ground, big ones on the wall catwalks), but they respawn slowly.
 
 ## Run it
 
