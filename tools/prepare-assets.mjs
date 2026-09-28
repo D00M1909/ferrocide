@@ -49,14 +49,11 @@ for (const [src, dst] of [
 ]) copy(`${kScifi}/${src}.ogg`, `sfx/${dst}.ogg`);
 
 // Sound effects (Pixabay, royalty free)
-for (const s of ['revolver', 'revolver2', 'shotgun', 'shotgun_pump', 'rocket', 'explosion', 'explosion2', 'coin', 'parry', 'whoosh', 'gore', 'flesh', 'armorhit', 'glass']) {
+for (const s of ['revolver', 'revolver2', 'shotgun', 'shotgun_pump', 'rocket', 'explosion', 'explosion2', 'coin', 'parry', 'whoosh', 'gore', 'flesh', 'armorhit', 'glass', 'growl1', 'growl2', 'growl3', 'growl4', 'scream1', 'roar1', 'death1', 'death2', 'ping', 'ricochet']) {
   copy(`pixabay_sfx/${s}.mp3`, `sfx/${s}.mp3`);
 }
 
-// Music (Pixabay, royalty free)
-for (const m of ['combat_heavy_industrial_metal', 'combat_industrial_jent_metal', 'boss_runaway_breakcore', 'menu_dark_ambient']) {
-  copy(`music/${m}.mp3`, `music/${m}.mp3`);
-}
+// Music: none — the soundtrack is composed and synthesised live (client/src/engine/music.ts)
 
 // Fonts + crosshair (Kenney, CC0)
 copy('kenney/kenney_kenney-fonts/Fonts/Kenney Future.ttf', 'fonts/KenneyFuture.ttf');

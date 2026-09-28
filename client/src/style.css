@@ -70,6 +70,9 @@ body {
 .logo {
   position: relative;
   display: inline-block;
+  white-space: nowrap;
+  width: max-content;
+  max-width: none;
   font-family: 'Future', sans-serif;
   font-size: clamp(46px, 8.5vw, 118px);
   letter-spacing: 0.14em;
@@ -128,7 +131,7 @@ body {
   gap: 10px;
 }
 .menu-left .logo {
-  font-size: clamp(40px, 5.2vw, 76px);
+  font-size: clamp(34px, 4.1vw, 58px);
   margin-bottom: 2px;
 }
 .menu-right {
@@ -468,7 +471,8 @@ label.small {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 18px;
+  font-family: 'Pixel', monospace;
+  font-size: 17px;
   letter-spacing: 0.12em;
   color: #fff;
   text-shadow: 2px 2px 0 #000;
@@ -560,7 +564,8 @@ label.small {
   animation: feed-in 0.18s ease-out both;
 }
 .style-feed .big {
-  color: var(--parry);
+  color: #fff;
+  text-shadow: 2px 2px 0 #000, 0 0 10px rgba(255, 90, 60, 0.9);
 }
 @keyframes feed-in {
   from { transform: translateX(40px); opacity: 0; }
@@ -573,6 +578,7 @@ label.small {
   left: 50%;
   transform: translateX(-50%);
   text-align: center;
+  font-family: 'Pixel', monospace;
   font-size: 15px;
   letter-spacing: 0.22em;
   text-shadow: 2px 2px 0 #000;
@@ -593,7 +599,8 @@ label.small {
   display: none;
 }
 .boss-bar .name {
-  font-size: 17px;
+  font-family: 'Pixel', monospace;
+  font-size: 16px;
   letter-spacing: 0.3em;
   color: #fff;
   text-shadow: 2px 2px 0 #000;
@@ -631,6 +638,7 @@ label.small {
   left: 0;
   right: 0;
   text-align: center;
+  font-family: 'Pixel', monospace;
   font-size: 18px;
   letter-spacing: 0.2em;
   color: #fdd;
@@ -640,6 +648,7 @@ label.small {
   position: absolute;
   left: 28px;
   top: 24px;
+  font-family: 'Pixel', monospace;
   font-size: 14px;
   letter-spacing: 0.1em;
   width: 240px;

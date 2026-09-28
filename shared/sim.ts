@@ -4,7 +4,7 @@
 // both players must agree on (enemies, damage, waves) is decided here, and every
 // client claim is validated and capped before it touches the world.
 import {
-  AIR_SPAWNS, GROUND_SPAWNS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, inZone, lineOfSight, moveBody, raycastWorld,
+  AIR_SPAWNS, GROUND_SPAWNS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, blockedAt, inZone, lineOfSight, moveBody, raycastWorld,
 } from './arena';
 import {
   ENEMIES, ENEMY_ATTACKS, PLAYER, PROJECTILES, PUNCH, SLAM, WEAPONS, type EnemyKind, type ProjectileKind,
@@ -35,6 +35,10 @@ interface SimPlayer {
   stats: PlayerStats;
   hurtIds: Set<number>;
   budget: number; // damage-per-second token bucket (anti-cheat)
+  boomTokens: number;
+  healBudget: number; // blood-heal rate limiter
+  deathPos: Vec3;
+  revive: number; // 0..REVIVE_TIME progress while a partner stands on the corpse
 }
 
 interface SimEnemy {
@@ -58,6 +62,11 @@ interface SimEnemy {
   summonT: number;
   cycle: number;
   shots: number;
+  lastStrikeT: number;
+  lastStrikeAid: number;
+  lastStrikeDmg: number;
+  invulnT: number;
+  blinkCd: number;
 }
 
 interface SimProjectile {
@@ -98,10 +107,51 @@ const BOOM_CAP: Partial<Record<HitKind, { r: number; d: number }>> = {
   core: { r: WEAPONS.shotgun.coreShotRadius, d: WEAPONS.shotgun.coreShotDamage },
   slam: { r: SLAM.radius, d: SLAM.baseDamage + SLAM.damagePerMeter * 40 },
 };
+/** Own-property lookup only: "toString"/"constructor" must never resolve to a cap. */
+function capOf<T>(table: Partial<Record<HitKind, T>>, k: unknown): T | undefined {
+  return typeof k === 'string' && Object.hasOwn(table, k) ? table[k as HitKind] : undefined;
+}
 const HURT_SOURCES: HurtSource[] = ['proj', 'melee', 'shock', 'beam', 'boom', 'lava', 'self'];
-const FX_TYPES = new Set(['shot', 'coin', 'coinhit', 'rocket', 'rocketdie', 'core', 'coredie', 'punch', 'ricochet']);
-const BUDGET_MAX = 1600;
-const BUDGET_REFILL = 1100; // per second
+const HIT_RANGE = 110; // arena diagonal is ~100 m
+// damage budget ~1.5x the best legitimate sustained DPS (swap-cancel rotation ~350)
+const BUDGET_MAX = 700;
+const BUDGET_REFILL = 520; // per second
+const BOOM_TOKENS = 5; // explosion claims: bursts allowed, sustained rate capped
+const BOOM_REFILL = 3;
+const BLOOD_HEAL_RATE = 35; // hp/s ceiling on blood healing
+const REVIVE_TIME = 2; // seconds a partner must stand on your corpse
+const REVIVE_RADIUS = 3;
+
+/** Rebuild an fx relay message from validated fields only (never forward raw client objects). */
+function cleanFx(m: Record<string, unknown>): FxMsg | null {
+  const V = (v: unknown): V | null => { const p = vec(v); return p ? [r2(p.x), r2(p.y), r2(p.z)] : null; };
+  const list = (v: unknown): V[] | null => {
+    if (!Array.isArray(v) || v.length > 16) return null;
+    const out: V[] = [];
+    for (const x of v) { const p = V(x); if (!p) return null; out.push(p); }
+    return out;
+  };
+  const id = num(m.id, NaN);
+  switch (m.t) {
+    case 'shot': {
+      const from = V(m.from), to = list(m.to);
+      return from && to && (m.w === 'revolver' || m.w === 'shotgun') ? { t: 'shot', w: m.w, from, to } : null;
+    }
+    case 'coin': case 'rocket': case 'core': {
+      const p = V(m.p), v = V(m.v);
+      return p && v && Number.isFinite(id) ? { t: m.t, id, p, v } : null;
+    }
+    case 'coinhit': case 'rocketdie': case 'coredie':
+      return Number.isFinite(id) ? { t: m.t, id } : null;
+    case 'punch':
+      return { t: 'punch' };
+    case 'ricochet': {
+      const pts = list(m.pts);
+      return pts && pts.length >= 2 ? { t: 'ricochet', pts } : null;
+    }
+  }
+  return null;
+}
 
 export class GameSim {
   time = 0;
@@ -137,6 +187,10 @@ export class GameSim {
       stats: { id, name, kills: 0, damage: 0, deaths: 0, taken: 0, style: 0, parries: 0 },
       hurtIds: new Set(),
       budget: BUDGET_MAX,
+      boomTokens: BOOM_TOKENS,
+      healBudget: BLOOD_HEAL_RATE,
+      deathPos: { ...sp },
+      revive: 0,
     });
     this.emit({ t: 'join', pid: id, name });
     if (inProgress) this.emit({ t: 'prespawn', pid: id, p: vv(sp) });
@@ -191,21 +245,36 @@ export class GameSim {
     if (!p || !p.alive || !m) return;
     const e = this.enemies.get(num(m.e, -1));
     const k = m.k as HitKind;
-    const cap = HIT_CAP[k];
+    const cap = capOf(HIT_CAP, k);
     if (!e || e.hp <= 0 || cap === undefined) return;
-    if (dist(p.pos, e.pos) > 160) return;
-    if (k === 'punch' && dist(p.pos, e.pos) > PUNCH.range + ENEMIES[e.kind].radius + 3) return;
+    const def = ENEMIES[e.kind];
+    if (dist(p.pos, e.pos) > HIT_RANGE) return;
+    if (k === 'punch' && dist(p.pos, e.pos) > PUNCH.range + def.radius + 3) return;
+    // hitscan needs a clear line from the shooter's eye to some part of the target
+    if (k === 'revolver' || k === 'shotgun') {
+      const eye = { x: p.pos.x, y: p.pos.y + 1.5, z: p.pos.z };
+      const mid = { x: e.pos.x, y: e.pos.y + (def.flying ? 0 : def.height * 0.5), z: e.pos.z };
+      const head = { x: e.pos.x, y: e.pos.y + (def.flying ? 0 : def.headY), z: e.pos.z };
+      if (!lineOfSight(eye, mid) && !lineOfSight(eye, head)) return;
+    }
     let dmg = this.spend(p, clamp(num(m.d), 0, cap));
     const hs = m.hs === true;
-    // punching a husk or brute in the last moment of its swing parries it
-    if (k === 'punch' && e.state === 'windup' && (e.attack === 'swipe' || e.attack === 'smash') && e.stateT < ENEMY_ATTACKS.husk.parryWindow + 0.05) {
+    // punching a husk/brute/stalker at the end of its swing parries it; a small grace
+    // after the strike covers the punch's network trip (and refunds the hit it landed)
+    const melee = e.attack === 'swipe' || e.attack === 'smash' || e.attack === 'slash';
+    const lateGrace = e.state === 'recover' && melee && this.time - e.lastStrikeT < 0.15;
+    if (k === 'punch' && melee && ((e.state === 'windup' && e.stateT < ENEMY_ATTACKS.husk.parryWindow + 0.1) || lateGrace)) {
+      if (lateGrace && e.lastStrikeAid) {
+        if (p.hurtIds.has(e.lastStrikeAid)) this.healPlayer(p, e.lastStrikeDmg, true);
+        else p.hurtIds.add(e.lastStrikeAid);
+      }
       e.state = 'stun';
       e.stateT = e.kind === 'brute' ? 1.1 : 1.6;
       p.stats.parries++;
       this.healPlayer(p, PUNCH.parryHeal, true);
       this.emit({ t: 'mparry', id: e.id, by: id });
       dmg *= 3;
-    } else if ((k === 'revolver' || k === 'ricoshot') && e.state === 'windup' && (e.kind === 'warden' || e.kind === 'drone')) {
+    } else if ((k === 'revolver' || k === 'ricoshot') && e.state === 'windup' && (e.kind === 'warden' || e.kind === 'drone' || e.kind === 'stalker')) {
       // a precise shot into a telegraphed ranged attack staggers it
       e.state = 'stun';
       e.stateT = 1.1;
@@ -221,8 +290,12 @@ export class GameSim {
     if (!p || !p.alive || !m) return;
     const c = vec(m.p);
     const k = m.k as HitKind;
-    const cap = localFx ? BOOM_CAP[k] : { r: 4, d: 45 };
-    if (!c || !cap || dist(c, p.pos) > 90) return;
+    const cap = localFx ? capOf(BOOM_CAP, k) : { r: 4, d: 45 };
+    if (!c || !cap || dist(c, p.pos) > (k === 'slam' ? 8 : 70)) return;
+    if (localFx) {
+      if (p.boomTokens < 1) return;
+      p.boomTokens -= 1;
+    }
     const r = clamp(num(m.r), 0, cap.r);
     const base = clamp(num(m.d), 0, cap.d);
     for (const e of this.enemies.values()) {
@@ -232,7 +305,8 @@ export class GameSim {
       const d = Math.max(0, dist(c, centre) - def.radius);
       if (d > r) continue;
       const falloff = 1 - (d / Math.max(r, 0.01)) * 0.6;
-      this.damageEnemy(e, this.spend(p, base * falloff), id, k, false, p);
+      // area damage is rate-limited by boom tokens instead of the per-hit budget
+      this.damageEnemy(e, base * falloff, id, k, false, p);
       if (!def.heavy) {
         const dir = { x: centre.x - c.x, y: 0, z: centre.z - c.z };
         const l = Math.hypot(dir.x, dir.z) || 1;
@@ -297,6 +371,8 @@ export class GameSim {
       p.hp = 0;
       p.hard = 0;
       p.alive = false;
+      p.deathPos = { ...p.pos };
+      p.revive = 0;
       p.stats.deaths++;
       p.respawnAt = this.time + PLAYER.respawnTime;
       this.emit({ t: 'pdie', pid: id });
@@ -306,9 +382,9 @@ export class GameSim {
 
   playerFx(id: string, raw: unknown): void {
     const m = obj(raw);
-    if (!this.players.has(id) || !m || typeof m.t !== 'string' || !FX_TYPES.has(m.t)) return;
-    if (JSON.stringify(m).length > 1500) return;
-    this.emit({ t: 'fx', from: id, fx: m as unknown as FxMsg });
+    if (!this.players.has(id) || !m) return;
+    const fx = cleanFx(m);
+    if (fx) this.emit({ t: 'fx', from: id, fx });
   }
 
   retry(): void {
@@ -337,6 +413,22 @@ export class GameSim {
     this.updatePhase(dt);
     for (const p of this.players.values()) {
       p.budget = Math.min(BUDGET_MAX, p.budget + BUDGET_REFILL * dt);
+      p.boomTokens = Math.min(BOOM_TOKENS, p.boomTokens + BOOM_REFILL * dt);
+      p.healBudget = Math.min(BLOOD_HEAL_RATE, p.healBudget + BLOOD_HEAL_RATE * dt);
+      // co-op revive: a living partner standing on your corpse brings you back early
+      if (!p.alive && p.respawnAt > 0 && this.phase !== 'over' && this.phase !== 'victory') {
+        let helping = false;
+        for (const o of this.players.values()) {
+          if (o !== p && o.alive && o.connected && dist(o.pos, p.deathPos) < REVIVE_RADIUS) helping = true;
+        }
+        p.revive = helping ? p.revive + dt : Math.max(0, p.revive - dt * 0.5);
+        if (p.revive >= REVIVE_TIME) {
+          const by = [...this.players.values()].find((o) => o !== p && o.alive && dist(o.pos, p.deathPos) < REVIVE_RADIUS);
+          this.respawn(p, p.deathPos, 50);
+          this.emit({ t: 'revive', pid: p.id, by: by?.id ?? '' });
+          continue;
+        }
+      }
       if (p.hard > 0) {
         p.hardT -= dt;
         if (p.hardT <= 0) p.hard = Math.max(0, p.hard - PLAYER.hardDamageDecay * dt);
@@ -361,7 +453,7 @@ export class GameSim {
       (x) => [x.id, PROJ_KINDS.indexOf(x.kind), r2(x.pos.x), r2(x.pos.y), r2(x.pos.z), r2(x.vel.x), r2(x.vel.y), r2(x.vel.z), x.kind === 'reflected' ? 1 : 0] as Snapshot['pr'][number],
     );
     const pl = [...this.players.values()].map(
-      (p) => [p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.vel.x), r2(p.vel.y), r2(p.vel.z), r2(p.yaw), r2(p.pitch), p.flags, p.weapon, Math.ceil(p.hp), p.alive ? 1 : 0, Math.floor(p.hard), p.connected ? 1 : 0] as PlayerSnap,
+      (p) => [p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.vel.x), r2(p.vel.y), r2(p.vel.z), r2(p.yaw), r2(p.pitch), p.flags, p.weapon, Math.ceil(p.hp), p.alive ? 1 : 0, Math.floor(p.hard), p.connected ? 1 : 0, r2(p.revive / REVIVE_TIME), r2(p.deathPos.x), r2(p.deathPos.y), r2(p.deathPos.z)] as PlayerSnap,
     );
     return { t: r2(this.time), e, pr, pl, wave: this.wave, phase: this.phase, left: this.waveLeft, timer: r2(this.phaseTimer) };
   }
@@ -378,7 +470,7 @@ export class GameSim {
     const def = WAVES[n - 1];
     this.phase = 'combat';
     this.wave = n;
-    const coop = Math.max(1, this.players.size);
+    const coop = Math.max(1, this.connectedCount());
     this.queue = [];
     for (const g of def.groups) {
       const count = g.kind === 'colossus' || g.kind === 'brute' ? g.count : Math.round(g.count * (1 + 0.5 * (coop - 1)));
@@ -396,7 +488,8 @@ export class GameSim {
     } else if (this.phase === 'combat') {
       let alive = 0;
       for (const e of this.enemies.values()) if (e.hp > 0) alive++;
-      while (this.queue.length && this.queue[0].at <= this.time && alive < MAX_ALIVE) {
+      const cap = this.wave > 4 ? MAX_ALIVE + 4 : MAX_ALIVE;
+      while (this.queue.length && this.queue[0].at <= this.time && alive < cap) {
         const q = this.queue.shift()!;
         this.spawnEnemy(q.kind, q.where);
         alive++;
@@ -426,19 +519,27 @@ export class GameSim {
   private checkDefeat(): void {
     if (this.phase !== 'combat' && this.phase !== 'intermission') return;
     if (this.players.size === 0) return;
-    for (const p of this.players.values()) if (p.alive) return;
+    for (const p of this.players.values()) if (p.alive && p.connected) return;
     this.finish(false);
   }
 
-  private respawn(p: SimPlayer): void {
-    const sp = PLAYER_SPAWNS[Math.floor(this.rand() * PLAYER_SPAWNS.length)];
+  private respawn(p: SimPlayer, at?: Vec3, hp: number = PLAYER.maxHealth): void {
+    const sp = at ?? PLAYER_SPAWNS[Math.floor(this.rand() * PLAYER_SPAWNS.length)];
     p.pos = { ...sp };
     p.vel = { x: 0, y: 0, z: 0 };
-    p.hp = PLAYER.maxHealth;
+    p.hp = hp;
     p.hard = 0;
     p.alive = true;
     p.respawnAt = 0;
+    p.revive = 0;
     this.emit({ t: 'prespawn', pid: p.id, p: vv(sp) });
+  }
+
+  /** Players still in the room (dropped players waiting to reconnect don't count). */
+  private connectedCount(): number {
+    let n = 0;
+    for (const p of this.players.values()) if (p.connected) n++;
+    return n;
   }
 
   private spawnEnemy(kind: EnemyKind, where: 'ground' | 'tower' | 'air'): void {
@@ -455,13 +556,14 @@ export class GameSim {
     }
     const jitter = kind === 'colossus' ? 0 : 2.5;
     const pos = { x: best.x + (this.rand() - 0.5) * jitter, y: best.y, z: best.z + (this.rand() - 0.5) * jitter };
-    const coopHp = (kind === 'colossus' || kind === 'brute') && this.players.size > 1 ? 1.5 : 1;
+    const coopHp = (kind === 'colossus' || kind === 'brute') && this.connectedCount() > 1 ? 1.5 : 1;
     const e: SimEnemy = {
       id: this.nextId++, kind, pos, vel: { x: 0, y: 0, z: 0 }, yaw: Math.atan2(pos.x, pos.z),
       hp: def.hp * coopHp, maxHp: def.hp * coopHp, state: 'spawn', stateT: kind === 'colossus' ? 2.5 : 0.9,
       target: null, retargetT: 0, cooldown: 1 + this.rand() * 1.5, attack: '', grounded: false,
       burstLeft: 0, strafeDir: this.rand() < 0.5 ? -1 : 1, phase: 1,
       summonT: ENEMY_ATTACKS.colossus.summonEvery, cycle: 0, shots: 0,
+      lastStrikeT: -9, lastStrikeAid: 0, lastStrikeDmg: 0, invulnT: 0, blinkCd: 2 + this.rand() * 2,
     };
     this.enemies.set(e.id, e);
     this.emit({ t: 'spawn', id: e.id, k: kind, p: vv(pos) });
@@ -470,20 +572,30 @@ export class GameSim {
   // ------------------------------------------------------------------ damage
 
   private damageEnemy(e: SimEnemy, dmg: number, by: string, how: string, hs: boolean, p: SimPlayer): void {
-    if (e.hp <= 0 || dmg <= 0) return;
+    if (e.hp <= 0 || dmg <= 0 || e.invulnT > 0) return;
+    // phase gates: the colossus can't be burst through a phase in one volley
+    if (e.kind === 'colossus') {
+      const nextGate = e.phase === 1 ? (e.maxHp * 2) / 3 : e.phase === 2 ? e.maxHp / 3 : 0;
+      if (nextGate > 0 && e.hp - dmg < nextGate) dmg = e.hp - nextGate + 1;
+    }
     const dealt = Math.min(dmg, e.hp);
     e.hp -= dmg;
     p.stats.damage += dealt;
-    // blood heals the aggressive: damage dealt up close restores (soft) health
+    // blood heals the aggressive: damage dealt up close restores (soft) health,
+    // rate-limited, and armoured heavies bleed less
     if (p.alive && dist(p.pos, e.pos) < PLAYER.bloodHealRange + ENEMIES[e.kind].radius) {
-      this.healPlayer(p, dealt * PLAYER.bloodHealFactor, false);
+      const want = dealt * PLAYER.bloodHealFactor * (ENEMIES[e.kind].heavy ? 0.5 : 1);
+      const amt = Math.min(want, p.healBudget);
+      p.healBudget -= amt;
+      this.healPlayer(p, amt, false);
     }
     this.emit({ t: 'dmg', id: e.id, d: r2(dealt), by, hs, k: how, p: vv(e.pos) });
     if (e.kind === 'colossus') {
-      const ph = e.hp < e.maxHp / 3 ? 3 : e.hp < (e.maxHp * 2) / 3 ? 2 : 1;
+      const ph = e.hp < e.maxHp / 3 + 2 ? 3 : e.hp < (e.maxHp * 2) / 3 + 2 ? 2 : 1;
       if (ph > e.phase && e.hp > 0) {
         e.phase = ph;
         e.cooldown = 0.4;
+        e.invulnT = 2;
         e.summonT = Math.min(e.summonT, 2);
         this.emit({ t: 'enrage', id: e.id });
       }
@@ -550,6 +662,8 @@ export class GameSim {
     const def = ENEMIES[e.kind];
     e.stateT -= dt;
     e.cooldown -= dt;
+    e.invulnT = Math.max(0, e.invulnT - dt);
+    e.blinkCd -= dt;
     if (e.state === 'spawn') {
       if (e.stateT <= 0) this.setState(e, 'move', 0);
       if (!def.flying) this.physics(e, dt, 0, 0);
@@ -558,6 +672,7 @@ export class GameSim {
     const tgt = this.phase === 'combat' || this.phase === 'intermission' ? this.pickTarget(e) : null;
     switch (e.kind) {
       case 'husk': this.aiHusk(e, tgt, dt); break;
+      case 'stalker': this.aiStalker(e, tgt, dt); break;
       case 'eye': this.aiEye(e, tgt, dt); break;
       case 'warden': this.aiWarden(e, tgt, dt); break;
       case 'drone': this.aiDrone(e, tgt, dt); break;
@@ -635,15 +750,21 @@ export class GameSim {
         if (tracking) this.face(e, t.pos, dt, 9);
         this.physics(e, dt, tracking ? (dx / l) * 5 : 0, tracking ? (dz / l) * 5 : 0);
         if (e.stateT <= 0) {
+          // commit: lunge forward; the blow lands 0.08 s later wherever the lunge carried it
           const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
           e.vel.x = fx * a.lunge;
           e.vel.z = fz * a.lunge;
-          const hit = { x: e.pos.x + fx * 1.5, y: e.pos.y + 1, z: e.pos.z + fz * 1.5 };
-          this.emit({ t: 'melee', id: e.id, aid: this.aid(), p: vv(hit), r: 1.8, d: a.damage });
-          this.setState(e, 'recover', a.recover);
+          this.setState(e, 'attack', 0.08);
         }
         break;
       }
+      case 'attack':
+        this.physics(e, dt, e.vel.x, e.vel.z, 60);
+        if (e.stateT <= 0) {
+          this.strike(e, 1.4, 1.8, a.damage);
+          this.setState(e, 'recover', a.recover);
+        }
+        break;
       case 'stun':
       case 'recover':
         this.physics(e, dt, 0, 0);
@@ -651,6 +772,70 @@ export class GameSim {
         break;
       default:
         this.setState(e, 'move', 0);
+    }
+  }
+
+  /** Emit a melee hit volume in front of an enemy and remember it for late parries. */
+  private strike(e: SimEnemy, reach: number, r: number, d: number): void {
+    const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+    const hit = { x: e.pos.x + fx * reach, y: e.pos.y + 1, z: e.pos.z + fz * reach };
+    const aid = this.aid();
+    e.lastStrikeT = this.time;
+    e.lastStrikeAid = aid;
+    e.lastStrikeDmg = d;
+    this.emit({ t: 'melee', id: e.id, aid, p: vv(hit), r, d });
+  }
+
+  /** Stalker: a fast flanker that blinks behind its target and slashes. Interrupt or dash. */
+  private aiStalker(e: SimEnemy, t: SimPlayer | null, dt: number): void {
+    const a = ENEMY_ATTACKS.stalker;
+    if (!t) { this.physics(e, dt, 0, 0); return; }
+    const d = distXZ(e.pos, t.pos);
+    const dx = t.pos.x - e.pos.x, dz = t.pos.z - e.pos.z;
+    const l = Math.hypot(dx, dz) || 1;
+    switch (e.state) {
+      case 'move': {
+        this.face(e, t.pos, dt, 12);
+        // weave while closing in so it's hard to track
+        const weave = Math.sin(this.time * 4 + e.id) * 0.6;
+        const sp = ENEMIES.stalker.speed;
+        this.physics(e, dt, ((dx / l) + (-dz / l) * weave) * sp, ((dz / l) + (dx / l) * weave) * sp);
+        if (d < a.range && Math.abs(t.pos.y - e.pos.y) < 2.2) {
+          this.setState(e, 'windup', a.windup, 'slash');
+          this.emit({ t: 'atk', id: e.id, a: 'slash', dur: a.windup });
+        } else if (e.blinkCd <= 0 && d < 28 && t.pos.y < 3) {
+          // blink to the target's flank/back
+          const side = this.rand() < 0.5 ? 1 : -1;
+          const back = -1;
+          const fwdX = -Math.sin(t.yaw), fwdZ = -Math.cos(t.yaw);
+          const to = {
+            x: clamp(t.pos.x + fwdX * back * a.blinkDist + -fwdZ * side * 2, -34, 34),
+            y: t.pos.y,
+            z: clamp(t.pos.z + fwdZ * back * a.blinkDist + fwdX * side * 2, -34, 34),
+          };
+          if (!blockedAt(to.x, to.y + 0.05, to.z, 0.4, 1.8)) {
+            this.emit({ t: 'atk', id: e.id, a: 'blink', dur: 0.1, target: vv(e.pos) });
+            e.pos = to;
+            e.vel = { x: 0, y: 0, z: 0 };
+            this.face(e, t.pos, 1, 100);
+            this.setState(e, 'windup', a.windup + 0.1, 'slash');
+            this.emit({ t: 'atk', id: e.id, a: 'slash', dur: a.windup + 0.1 });
+          }
+          e.blinkCd = a.blinkEvery * (0.8 + this.rand() * 0.5);
+        }
+        break;
+      }
+      case 'windup':
+        if (e.stateT > 0.12) this.face(e, t.pos, dt, 10);
+        this.physics(e, dt, 0, 0);
+        if (e.stateT <= 0) {
+          this.strike(e, 1.5, 1.9, a.damage);
+          this.setState(e, 'recover', 0.45);
+        }
+        break;
+      default:
+        this.physics(e, dt, 0, 0);
+        if (e.stateT <= 0) this.setState(e, 'move', 0);
     }
   }
 
@@ -845,7 +1030,11 @@ export class GameSim {
     if (attack === 'smash') {
       const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
       const p = { x: e.pos.x + fx * 2.4 * sizeMul, y: e.pos.y + 1, z: e.pos.z + fz * 2.4 * sizeMul };
-      this.emit({ t: 'melee', id: e.id, aid: this.aid(), p: vv(p), r: 2.6 * sizeMul, d: a.meleeDamage });
+      const aid = this.aid();
+      e.lastStrikeT = this.time;
+      e.lastStrikeAid = aid;
+      e.lastStrikeDmg = a.meleeDamage;
+      this.emit({ t: 'melee', id: e.id, aid, p: vv(p), r: 2.6 * sizeMul, d: a.meleeDamage });
       this.emit({ t: 'boom', p: vv({ x: p.x, y: e.pos.y, z: p.z }), r: 2, d: 0, hostile: false, aid: 0, k: 'dust' });
     } else if (attack === 'stomp') {
       this.emit({ t: 'shock', id: e.id, aid: this.aid(), p: vv(e.pos), speed: a.waveSpeed * (sizeMul > 1 ? 1.2 : 1), range: a.waveRange * sizeMul, d: a.stompDamage });

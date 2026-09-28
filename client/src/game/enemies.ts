@@ -48,6 +48,11 @@ const SKINS: Record<EnemyKind, Skin> = {
     anims: { move: ['Walk'], idle: ['Idle'], recover: ['Idle'], death: ['Death'], spawn: ['Idle'], stun: ['HitReact'] },
     attackAnims: { smash: ['Punch'], stomp: ['Jump'], mortar: ['Weapon', 'Wave'] },
   },
+  stalker: {
+    // lean, near-black flanker with violet-white eyes (distinct from the bone husks)
+    model: 'enemy_large', hue: -1.2, sat: 0.2, bright: 0.32, emissive: 0x0a0010, rim: 0xb040ff, eyes: 0xe0b0ff, eyeSize: 0.2, horns: 2, bulk: 0.75,
+    anims: { move: ['Run'], idle: ['Idle'], windup: ['Punch'], recover: ['Idle'], stun: ['HitReact'], death: ['Death'], spawn: ['Idle'], hit: ['HitReact'] },
+  },
   colossus: {
     model: 'mech', hue: -2.4, sat: 0.3, bright: 0.45, emissive: 0x2a0600, rim: 0xff6a10, eyes: 0xff8a10, eyeSize: 1.1, horns: 6, metal: true, bulk: 1.15,
     anims: { move: ['Walk'], idle: ['Idle'], recover: ['Idle'], beam: ['Shoot_Big'], death: ['Death'], spawn: ['Hello', 'Idle'] },
@@ -56,7 +61,7 @@ const SKINS: Record<EnemyKind, Skin> = {
 };
 
 /** Vocal pitch per creature (metal enemies don't growl). */
-const VOICE: Record<EnemyKind, number> = { husk: 1, eye: 1.8, warden: 1, drone: 1, brute: 0.55, colossus: 0.4 };
+const VOICE: Record<EnemyKind, number> = { husk: 1, eye: 1.8, warden: 1, drone: 1, brute: 0.55, colossus: 0.4, stalker: 1.35 };
 
 const hornGeo = new THREE.ConeGeometry(0.5, 1, 4);
 const hornMat = new THREE.MeshLambertMaterial({ color: 0x1a1614, emissive: 0x120200 });
@@ -80,6 +85,7 @@ export class EnemyView {
   telegraphDur = 0;
   telegraphColor = new THREE.Color();
   meleeTelegraph = false;
+  blinkFx = 0;
   anim: THREE.AnimationAction | null = null;
   lockAnim = 0;
   spawnT = 0;
@@ -106,6 +112,7 @@ export class EnemyView {
       emissive: skin.emissive ? new THREE.Color(skin.emissive) : undefined,
       flashColor: new THREE.Color(1, 1, 1),
       rim: new THREE.Color(skin.rim).multiplyScalar(0.8),
+      eyeless: skin.model === 'enemy_large' || skin.model === 'enemy_small',
     });
     if (skin.bulk) {
       this.inst.inner.scale.x *= skin.bulk;
@@ -121,7 +128,7 @@ export class EnemyView {
       const h = new THREE.Mesh(hornGeo, hornMat);
       const side = i % 2 === 0 ? 1 : -1;
       const row = Math.floor(i / 2);
-      const sz = this.def.height * (this.def.flying ? 0.28 : 0.1);
+      const sz = this.def.height * (this.def.flying ? 0.5 : 0.23);
       h.scale.set(sz * 0.35, sz * (1.4 - row * 0.25), sz * 0.35);
       h.position.set(side * sz * (0.45 + row * 0.25), sz * 0.35, sz * (0.1 + row * 0.35));
       h.rotation.set(-0.35 - row * 0.3, 0, -side * 0.45);
@@ -255,7 +262,7 @@ export class Enemies {
         this.fx.flashLight(c, 0xff2010, big ? 10 : 5, big ? 30 : 14, 0.6);
         this.fx.tracer({ x: c.x, y: c.y + 40, z: c.z }, { x: c.x, y: v.pos.y, z: c.z }, 0xff3020, big ? 0.9 : 0.35, 0.5);
         this.audio.play('spawn', { at: c, volume: big ? 1.2 : 0.7, pitch: big ? 0.6 : 1 });
-        if (!SKINS[e.k].metal) this.audio.growl(c, VOICE[e.k], big ? 1.1 : 0.5, big ? 0.9 : 0.4);
+        if (!SKINS[e.k].metal) this.audio.play(big ? 'roar' : 'growl', { at: c, pitch: VOICE[e.k], volume: big ? 1 : 0.55, dur: big ? 1.6 : 0.8, reverb: 0.4 });
         if (big) this.fx.shake(0.4);
         break;
       }
@@ -280,7 +287,16 @@ export class Enemies {
         if (!v || v.dead) break;
         const parry = PARRYABLE_ATTACKS.has(e.a);
         v.telegraphT = v.telegraphDur = e.dur;
-        v.meleeTelegraph = e.a === 'swipe' || e.a === 'smash';
+        v.meleeTelegraph = e.a === 'swipe' || e.a === 'smash' || e.a === 'slash';
+        if (e.a === 'blink') {
+          // vanish in a violet burst at the old spot; reappear at the new one
+          const from = e.target ? { x: e.target[0], y: e.target[1] + 1, z: e.target[2] } : v.centre();
+          this.fx.magic(from, 26, COLORS.purple, 5, 0.5);
+          this.fx.glow(from, 2.5, COLORS.purple, 0.25);
+          this.audio.play('forcefield', { at: from, volume: 0.9, pitch: 1.8 });
+          v.blinkFx = 0.25;
+          break;
+        }
         v.telegraphColor.set(parry ? 0xfff2a0 : e.a === 'beam' ? 0xff2020 : 0xff6a20);
         if (e.a === 'leap') v.play('leap', '', true);
         else {
@@ -294,7 +310,9 @@ export class Enemies {
         else if (e.a === 'stomp') this.audio.play('metal_heavy', { at: head, volume: 0.8, pitch: 0.6 });
         else if (e.a === 'burst') this.audio.play('laser_retro', { at: head, volume: 0.5, pitch: 1.6 });
         else this.audio.play('whoosh', { at: head, volume: 0.5, pitch: 0.7 });
-        if (!v.skin.metal && (e.a === 'swipe' || e.a === 'smash' || e.a === 'dive' || e.a === 'stomp' || e.a === 'leap')) this.audio.growl(head, VOICE[v.kind] * 1.1, 0.35, 0.45);
+        if (!v.skin.metal && (e.a === 'swipe' || e.a === 'smash' || e.a === 'slash' || e.a === 'dive' || e.a === 'stomp' || e.a === 'leap')) {
+          this.audio.play(e.a === 'dive' || e.a === 'slash' ? 'scream' : 'growl', { at: head, pitch: VOICE[v.kind] * 1.1, volume: 0.6, dur: 0.5, offset: 0.05 });
+        }
         break;
       }
       case 'mparry': {
@@ -345,7 +363,7 @@ export class Enemies {
     this.fx.bloodMist(c, heavy ? 14 : 6, heavy ? 2.5 : 1);
     this.fx.splatter(c, heavy ? 16 : 6, heavy ? 8 : 4, heavy ? 3 : 1.4);
     this.audio.play('gore', { at: c, volume: heavy ? 1.3 : 0.9, pitch: heavy ? 0.7 : 1 });
-    if (!v.skin.metal) this.audio.growl(c, VOICE[v.kind] * 1.5, heavy ? 0.9 : 0.3, heavy ? 0.8 : 0.35);
+    if (!v.skin.metal) this.audio.play(heavy ? 'roar' : 'edeath', { at: c, pitch: VOICE[v.kind] * (heavy ? 0.8 : 1.2), volume: heavy ? 1 : 0.6, dur: heavy ? 1.8 : 0.7 });
     if (v.kind === 'drone' || v.kind === 'warden' || v.kind === 'colossus') {
       this.fx.explosion(c, heavy ? 6 : 2.2);
       this.fx.sparks(c, 30, 12);
@@ -406,6 +424,9 @@ export class Enemies {
       (v.eyes.material as THREE.SpriteMaterial).opacity = 0.75 + Math.sin(now * 9 + v.id) * 0.25;
       v.horns.position.copy(v.headWorld);
       v.horns.rotation.y = v.yaw;
+      // eyes + horns grow in with the spawn scale-in
+      v.horns.scale.copy(v.inst.root.scale);
+      v.eyes.scale.set(v.skin.eyeSize * 2.2 * v.inst.root.scale.x, v.skin.eyeSize * v.inst.root.scale.y, 1);
       // spawn scale-in
       if (v.spawnT > 0) {
         v.spawnT = Math.max(0, v.spawnT - dt * 1.4);

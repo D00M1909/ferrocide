@@ -43,9 +43,9 @@ export const PLAYER = {
   respawnTime: 10,
   bloodHealRange: 5,
   bloodHealFactor: 0.32,
-  hardDamageFraction: 0.35, // share of every hit that can't be healed back right away
-  hardDamageDelay: 1.2,
-  hardDamageDecay: 25, // hp/s once the delay passes
+  hardDamageFraction: 0.4, // share of every hit that can't be healed back right away
+  hardDamageDelay: 2.0,
+  hardDamageDecay: 12, // hp/s once the delay passes
   airSpeedCap: 38, // strafing can't accelerate you past this
 };
 
@@ -114,7 +114,7 @@ export const SLAM = {
   radius: 5.5,
 };
 
-export type EnemyKind = 'husk' | 'eye' | 'warden' | 'drone' | 'brute' | 'colossus';
+export type EnemyKind = 'husk' | 'eye' | 'warden' | 'drone' | 'brute' | 'colossus' | 'stalker';
 
 export interface EnemyDef {
   name: string;
@@ -132,18 +132,20 @@ export interface EnemyDef {
 export const ENEMIES: Record<EnemyKind, EnemyDef> = {
   husk: { name: 'HUSK', hp: 55, speed: 10.5, radius: 0.5, height: 1.9, flying: false, headY: 1.62, headR: 0.3, score: 60, heavy: false },
   eye: { name: 'GAZER', hp: 22, speed: 13, radius: 0.45, height: 0.9, flying: true, headY: 0.45, headR: 0.45, score: 40, heavy: false },
-  warden: { name: 'WARDEN', hp: 120, speed: 6, radius: 0.8, height: 2.3, flying: false, headY: 1.9, headR: 0.45, score: 100, heavy: false },
+  warden: { name: 'WARDEN', hp: 160, speed: 6, radius: 0.8, height: 2.3, flying: false, headY: 1.9, headR: 0.45, score: 100, heavy: false },
   drone: { name: 'SENTRY DRONE', hp: 65, speed: 9, radius: 0.6, height: 1.1, flying: true, headY: 0.55, headR: 0.4, score: 90, heavy: false },
-  brute: { name: 'BRUTE', hp: 520, speed: 5.5, radius: 1.5, height: 4.2, flying: false, headY: 3.5, headR: 0.8, score: 250, heavy: true },
+  brute: { name: 'BRUTE', hp: 900, speed: 5.5, radius: 1.5, height: 4.2, flying: false, headY: 3.5, headR: 0.8, score: 250, heavy: true },
   colossus: { name: 'THE FOUNDRY COLOSSUS', hp: 4500, speed: 4.2, radius: 2.6, height: 7.4, flying: false, headY: 6.2, headR: 1.3, score: 1500, heavy: true },
+  stalker: { name: 'STALKER', hp: 90, speed: 14, radius: 0.5, height: 2.1, flying: false, headY: 1.82, headR: 0.3, score: 110, heavy: false },
 };
 
 export const ENEMY_ATTACKS = {
   husk: { range: 2.6, windup: 0.42, recover: 0.55, damage: 18, lunge: 14, parryWindow: 0.3 },
   eye: { range: 1.6, damage: 14, diveSpeed: 22, windup: 0.5 },
   warden: { windup: 0.7, cooldown: 2.4, orbSpeed: 17, orbDamage: 22, preferredMin: 13, preferredMax: 26 },
-  drone: { windup: 0.55, cooldown: 2.6, burst: 3, burstGap: 0.14, boltSpeed: 46, boltDamage: 9, lead: 0.6 },
+  drone: { windup: 0.55, cooldown: 2.0, burst: 3, burstGap: 0.14, boltSpeed: 46, boltDamage: 9, lead: 0.6 },
   brute: { stompWindup: 0.9, stompDamage: 26, waveSpeed: 17, waveRange: 26, mortarWindup: 0.8, mortarDamage: 30, mortarRadius: 4.5, cooldown: 2.6, meleeRange: 4.2, meleeDamage: 35 },
+  stalker: { range: 2.4, windup: 0.32, damage: 16, blinkEvery: 3.4, blinkDist: 3.5 },
   colossus: { beamWindup: 1.3, beamTime: 2.2, beamDps: 70, beamSweep: 1.4, summonEvery: 14, ringOrbs: 14, ringSpeed: 13 },
 };
 

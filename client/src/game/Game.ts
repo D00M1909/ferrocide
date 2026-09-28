@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { ENEMIES, PLAYER, PLAYER_SEND_RATE, SLAM, WEAPON_ORDER } from '../../../shared/constants';
 import { Motor, type MoveInput } from '../../../shared/movement';
+import { blockedAt } from '../../../shared/arena';
 import { PF, type GameEvent, type HitKind, type Phase, type PlayerStats, type Snapshot, type V } from '../../../shared/protocol';
 import { WAVES } from '../../../shared/waves';
 import { sprite } from '../engine/assets';
@@ -71,7 +72,9 @@ export class Game {
   private hurtFlash = 0;
   private flashAmt = 0;
   private flashColor = new THREE.Color();
-  private viewLag = 0; // hitstop freezes the rendered world, then it catches up
+  private viewLag = 0; // co-op: hitstop freezes the rendered world, then it catches up
+  private simClock = 0; // solo: world time (stops during hitstop, so the sim truly freezes)
+  private delayed: { at: number; e: GameEvent }[] = [];
   private lastRaf = 0;
   private running = false;
   private tmpEye = new THREE.Vector3();
@@ -85,6 +88,7 @@ export class Game {
   onReset: (() => void) | null = null;
   onConnection: ((ok: boolean) => void) | null = null;
   fps = 0;
+  private myRevive = 0;
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement, readonly audio: Audio, readonly input: Input, public settings: Settings) {
     this.renderer = new RetroRenderer(canvas);
@@ -159,7 +163,12 @@ export class Game {
     link.handlers.events = (e) => this.onEvents(e);
     link.handlers.disconnect = (r) => this.onDisconnect?.(r);
     link.handlers.drop = () => this.onConnection?.(false);
-    link.handlers.reconnect = () => this.onConnection?.(true);
+    link.handlers.reconnect = () => {
+      // the server clock kept running: drop stale interpolation history and resync
+      this.snaps.clear();
+      this.delayed = [];
+      this.onConnection?.(true);
+    };
     this.motor.reset({ x: players.findIndex((p) => p.id === link.id) === 1 ? 2.5 : -2.5, y: 1.2, z: 3 });
     this.yaw = 0;
     this.pitch = 0;
@@ -204,7 +213,7 @@ export class Game {
 
   private onSnap(s: Snapshot): void {
     const now = performance.now() / 1000;
-    this.snaps.push(s, now);
+    this.snaps.push(s, this.netNow());
     this.hazards.applySnapshot(s, now);
     if (s.phase !== this.phase) {
       this.phase = s.phase;
@@ -218,6 +227,11 @@ export class Game {
       if (p[0] === this.selfId) {
         this.hp = p[11];
         this.hard = p[13] ?? 0;
+        // resync after a reconnect: the snapshot is the truth if we missed pdie/prespawn
+        const serverAlive = p[12] === 1;
+        if (serverAlive && !this.alive) this.onRespawn({ x: p[1], y: p[2], z: p[3] });
+        else if (!serverAlive && this.alive && this.phase === 'combat') this.onDeath();
+        this.myRevive = p[15] ?? 0;
         continue;
       }
       seen.add(p[0]);
@@ -227,9 +241,42 @@ export class Game {
   }
 
   private onEvents(list: GameEvent[]): void {
+    for (const e of list) {
+      // one malformed event must never swallow the rest of the batch (kills, waves, game over)
+      try {
+        // hostile timing events are held until the moment the enemy is *drawn* doing them
+        if (e.t === 'atk' || e.t === 'melee' || e.t === 'shock' || e.t === 'beam' || (e.t === 'boom' && e.hostile)) {
+          this.delayed.push({ at: this.netNow() + this.viewDelay(), e });
+          continue;
+        }
+        this.handleEvent(e);
+      } catch (err) {
+        console.warn('event failed', e.t, err);
+      }
+    }
+  }
+
+  /** How far behind "now" the world is drawn (interpolation + hitstop freeze). */
+  private viewDelay(): number {
+    return this.snaps.delay + this.viewLag;
+  }
+
+  private netNow(): number {
+    return this.link?.online ? performance.now() / 1000 : this.simClock;
+  }
+
+  private flushDelayed(): void {
+    const t = this.netNow();
+    while (this.delayed.length && this.delayed[0].at <= t) {
+      const { e } = this.delayed.shift()!;
+      try { this.handleEvent(e); } catch (err) { console.warn('event failed', e.t, err); }
+    }
+  }
+
+  private handleEvent(e: GameEvent): void {
     const now = performance.now() / 1000;
     const me = this.selfId;
-    for (const e of list) {
+    {
       switch (e.t) {
         case 'spawn': case 'dmg': case 'atk': case 'enrage':
           this.enemies.onEvent(e, now);
@@ -266,6 +313,11 @@ export class Game {
         case 'prespawn':
           if (e.pid === me) this.onRespawn({ x: e.p[0], y: e.p[1], z: e.p[2] });
           break;
+        case 'revive':
+          if (e.pid === me) this.hud.showBanner('REVIVED', `${this.names.get(e.by) ?? 'PARTNER'} DRAGGED YOU BACK`, 2);
+          else if (e.by === me) { this.hud.showBanner('PARTNER REVIVED', '', 1.6); this.style.add('SECOND WIND', 120, true); }
+          this.audio.synth('rankup', 0.7);
+          break;
         case 'wave': {
           this.hud.showBanner(e.boss ? 'WARNING' : `WAVE ${e.n}`, e.title, 2.6);
           this.audio.play('door', { volume: 0.8, pitch: 0.6 });
@@ -291,6 +343,7 @@ export class Game {
           void this.audio.playMusic('menu');
           break;
         case 'reset':
+          this.delayed = [];
           this.enemies.clear();
           this.hazards.clear();
           this.weapons.clear();
@@ -375,7 +428,9 @@ export class Game {
     const now = this.time;
     const s = this.style;
     const head = (v as EnemyView & { lastHead?: boolean }).lastHead;
-    s.add(v.def.heavy ? `${v.def.name} SLAIN` : 'KILL', v.def.score, v.def.heavy, this.weapons.current);
+    // credit the weapon that actually did it (rockets/cores/coins can land after a swap)
+    const weapon = weaponOf(how) ?? (v as EnemyView & { lastWeapon?: string }).lastWeapon;
+    s.add(v.def.heavy ? `${v.def.name} SLAIN` : 'KILL', v.def.score, v.def.heavy, weapon);
     if (head) s.add('HEADSHOT', 35);
     if (!this.motor.grounded) s.add('AIRBORNE', 40);
     if (Math.hypot(this.motor.vel.x, this.motor.vel.z) > 23) s.add('SPEEDKILL', 30);
@@ -417,11 +472,16 @@ export class Game {
       damage: (v, dmg, kind, head, point, dir, extra) => {
         if (v.dead) return;
         (v as EnemyView & { lastHead?: boolean }).lastHead = head;
+        const w = weaponOf(kind);
+        if (w) {
+          (v as EnemyView & { lastWeapon?: string }).lastWeapon = w;
+          this.style.noteDamage(w, dmg);
+        }
         this.fx.blood(point, Math.min(24, 4 + dmg / 4), dir, 6);
         if (dmg >= 25) this.fx.splatter(point, 1, 4, 0.9);
         const metal = v.kind === 'drone' || v.kind === 'warden' || v.kind === 'colossus';
         this.audio.play(metal ? 'metal_light' : 'flesh', { at: point, volume: Math.min(1, 0.4 + dmg / 60) });
-        if (head) this.audio.play('metal_light', { volume: 0.7, pitch: 2.2, variance: 0.02 });
+        if (head) this.audio.play('ping', { volume: 0.55, pitch: 1.1, variance: 0.04, dur: 0.35, reverb: 0.1 });
         this.hud.hitmarker(false);
         this.style.trickle(dmg * 0.12);
         link.hit({ e: v.id, d: Math.round(dmg * 10) / 10, k: kind, hs: head || undefined, rc: extra?.rc });
@@ -473,13 +533,19 @@ export class Game {
     if (this.fx.hitstop > 0) {
       this.fx.hitstop -= dt;
       worldDt = dt * 0.06;
-      this.viewLag = Math.min(0.4, this.viewLag + dt - worldDt);
+      // co-op can't pause the server, so the drawn world freezes and then catches up;
+      // solo simply runs the simulation on world time, so enemies truly freeze too
+      if (link.online) this.viewLag = Math.min(0.4, this.viewLag + dt - worldDt);
     } else if (this.viewLag > 0) {
       this.viewLag = Math.max(0, this.viewLag - dt * 0.6); // catch back up at 1.6x
     }
     if (soloPaused) worldDt = 0;
-    if (!soloPaused) link.update(dt);
-    const viewNow = now - this.viewLag;
+    if (!link.online) {
+      this.simClock += worldDt;
+      link.update(worldDt);
+    } else link.update(dt);
+    const viewNow = this.netNow() - this.viewLag;
+    this.flushDelayed();
 
     // look
     const mouse = this.input.consumeMouse();
@@ -522,6 +588,10 @@ export class Game {
         first = false;
       }
       this.pushOutOfEnemies();
+      // failsafe: anything that ever escapes the arena is put back on the dais
+      if (this.motor.pos.y < -8 || Math.abs(this.motor.pos.x) > 37 || Math.abs(this.motor.pos.z) > 37) {
+        this.motor.reset({ x: 0, y: 1.3, z: 4 });
+      }
       this.handleMotorEvents();
     }
 
@@ -560,7 +630,8 @@ export class Game {
 
     // music intensity follows the fight and the style rank
     const combat = this.phase === 'combat' && this.enemies.views.size > 0;
-    this.audio.setIntensity(combat ? 0.84 + this.style.rank * 0.023 : 0.35);
+    // calm: pads + percussion · fighting: drums + bass · high style ranks: the lead joins
+    this.audio.setIntensity(combat ? 0.5 + this.style.rank * 0.05 : 0.2);
 
     // upload our state
     this.sendAcc += dt;
@@ -583,7 +654,11 @@ export class Game {
     if (!this.alive) {
       this.deadT += dt;
       const left = Math.max(0, PLAYER.respawnTime - this.deadT);
-      this.hud.setCenter(link.online && this.phase !== 'over' ? `YOU DIED — RESPAWN IN ${Math.ceil(left)}` : 'YOU DIED');
+      this.hud.setCenter(
+        !link.online || this.phase === 'over' ? 'YOU DIED'
+          : this.myRevive > 0 ? `BEING REVIVED ${Math.round(this.myRevive * 100)}%`
+          : `YOU DIED — RESPAWN IN ${Math.ceil(left)} · YOUR PARTNER CAN REVIVE YOU`,
+      );
     }
 
     this.updateCamera(dt);
@@ -615,8 +690,11 @@ export class Game {
       const d = Math.hypot(dx, dz);
       if (d >= min) continue;
       const nx = d > 1e-4 ? dx / d : 1, nz = d > 1e-4 ? dz / d : 0;
-      m.pos.x = v.pos.x + nx * min;
-      m.pos.z = v.pos.z + nz * min;
+      const tx = v.pos.x + nx * min, tz = v.pos.z + nz * min;
+      // never shove the player into level geometry (that used to pop them onto wall tops)
+      if (blockedAt(tx, m.pos.y + 0.05, tz, PLAYER.halfWidth, m.height - 0.1)) continue;
+      m.pos.x = tx;
+      m.pos.z = tz;
       const into = m.vel.x * nx + m.vel.z * nz;
       if (into < 0) { m.vel.x -= nx * into; m.vel.z -= nz * into; }
     }
@@ -752,5 +830,13 @@ export class Game {
 
 function r2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/** Which gun a damage kind belongs to (punches, slams and parries belong to none). */
+function weaponOf(kind: string): string | undefined {
+  if (kind === 'revolver' || kind === 'ricoshot') return 'revolver';
+  if (kind === 'shotgun' || kind === 'core') return 'shotgun';
+  if (kind === 'rocket') return 'launcher';
+  return undefined;
 }
 

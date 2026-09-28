@@ -16,7 +16,7 @@ const DEFAULTS: Settings = {
   sensitivity: 1,
   fov: 100,
   master: 0.8,
-  music: 0.6,
+  music: 0.5,
   sfx: 0.9,
   resolution: 360,
   dither: true,

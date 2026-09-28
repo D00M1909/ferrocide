@@ -82,10 +82,10 @@ async function boot(): Promise<void> {
       ui.appendChild(toast);
     }
   };
-  // don't let a stray Ctrl+W / refresh end a run without asking
-  window.addEventListener('beforeunload', (e) => {
-    if (game.mode === 'play' && !botMode) e.preventDefault();
-  });
+  // (no beforeunload prompt: it fired on every dev hot-reload and refresh. Ctrl+W is
+  // instead swallowed by the fullscreen keyboard lock while you're playing.)
+  // co-op: tell the server we left on purpose so the partner isn't kept waiting 20 s
+  window.addEventListener('pagehide', () => game.link?.leave());
   game.startLoop();
   document.addEventListener('pointerlockchange', () => {
     if (!game || game.mode !== 'play' || botMode) return;
@@ -350,7 +350,7 @@ function showResults(info: GameOverInfo): void {
       <div class="hint" style="margin:0 auto">TIME ${mins}:${String(secs).padStart(2, '0')}</div>
       <table><tr><th>SLAYER</th><th>KILLS</th><th>DAMAGE</th><th>STYLE</th><th>PARRIES</th><th>DEATHS</th></tr>${rows}</table>
       <div style="display:flex;gap:8px">
-        ${info.win ? '' : `<button class="primary" id="retry">RETRY WAVE ${info.wave}</button>`}
+        ${info.win ? '' : game.link?.isHost !== false ? `<button class="primary" id="retry">RETRY WAVE ${info.wave}</button>` : '<div class="hint" style="align-self:center">WAITING FOR THE HOST TO RETRY…</div>'}
         <button id="menu">MAIN MENU</button>
       </div>
     </div>`);

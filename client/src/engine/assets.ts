@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { psxify, type PsxOptions } from './psx';
+import { psxify, Textures, type PsxOptions } from './psx';
 
 export const MODEL_FILES = [
   'enemy_large', 'enemy_small', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher',
@@ -64,7 +64,45 @@ export interface ModelInstance {
   height: number;
 }
 
+const socketCache = new Map<THREE.Texture, THREE.Texture>();
+
+/**
+ * Paints the stock cartoon eyes out of a texture atlas: bright, unsaturated texels
+ * (sclera) become dark scorched sockets so the glowing eyes we add are what reads.
+ */
+function eyeless(src: THREE.Texture): THREE.Texture {
+  const cached = socketCache.get(src);
+  if (cached) return cached;
+  const img = src.image as (CanvasImageSource & { width: number; height: number }) | undefined;
+  if (!img || !img.width) return src;
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, c.width, c.height);
+  const d = data.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max > 200 && max - min < 40) {
+      d[i] = 26; d[i + 1] = 8; d[i + 2] = 8;
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.flipY = src.flipY;
+  t.colorSpace = src.colorSpace;
+  t.wrapS = src.wrapS;
+  t.wrapT = src.wrapT;
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = THREE.NearestMipmapNearestFilter;
+  socketCache.set(src, t);
+  return t;
+}
+
 export interface InstanceOpts extends PsxOptions {
+  eyeless?: boolean;
   height: number;
   center?: boolean; // centre vertically instead of standing on the origin
   emissive?: THREE.Color;
@@ -94,7 +132,7 @@ export function instance(name: ModelName, o: InstanceOpts): ModelInstance {
       if (cached) return cached;
       const s = src as THREE.MeshStandardMaterial;
       const m = new THREE.MeshLambertMaterial({
-        map: s.map ?? null,
+        map: s.map ? (o.eyeless ? eyeless(s.map) : s.map) : null,
         color: s.color ? s.color.clone() : new THREE.Color(1, 1, 1),
         emissive: o.emissive ?? (s.emissive ? s.emissive.clone() : new THREE.Color(0, 0, 0)),
         emissiveMap: s.emissiveMap ?? null,
@@ -170,11 +208,21 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
     return holder;
   }
   const inner = gltf.scene.clone(true);
+  inner.updateMatrixWorld(true);
+  const rawSize = new THREE.Box3().setFromObject(inner).getSize(new THREE.Vector3());
+  const texel = Math.max(rawSize.x, rawSize.y, rawSize.z) / 3; // ~3 texture repeats along the gun
+  const wear = gunTexture();
   inner.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh) return;
     const src = mesh.material as THREE.MeshStandardMaterial;
-    const m = new THREE.MeshLambertMaterial({ map: src.map ?? null, color: src.color?.clone() ?? new THREE.Color(1, 1, 1) });
+    // the stock guns are flat-coloured: give them box-projected UVs and a worn-steel map
+    let map = src.map ?? null;
+    if (!map) {
+      mesh.geometry = boxProjectUVs(mesh.geometry.clone(), mesh.matrixWorld, texel);
+      map = wear;
+    }
+    const m = new THREE.MeshLambertMaterial({ map, color: src.color?.clone() ?? new THREE.Color(1, 1, 1) });
     if (m.map) m.map.magFilter = THREE.NearestFilter;
     mesh.material = psxify(m, { ...psx, snap: false });
   });
@@ -190,6 +238,32 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
   inner.position.sub(c);
   holder.add(inner);
   return holder;
+}
+
+let gunTex: THREE.Texture | null = null;
+function gunTexture(): THREE.Texture {
+  if (!gunTex) gunTex = Textures.gunmetal();
+  return gunTex;
+}
+
+/** Tri-planar-ish UVs: each vertex is projected along its dominant normal axis. */
+function boxProjectUVs(geo: THREE.BufferGeometry, matrix: THREE.Matrix4, texel: number): THREE.BufferGeometry {
+  if (!geo.attributes.normal) geo.computeVertexNormals();
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const nrm = geo.attributes.normal as THREE.BufferAttribute;
+  const uv = new Float32Array(pos.count * 2);
+  const p = new THREE.Vector3(), n = new THREE.Vector3();
+  const nm = new THREE.Matrix3().getNormalMatrix(matrix);
+  for (let i = 0; i < pos.count; i++) {
+    p.fromBufferAttribute(pos, i).applyMatrix4(matrix);
+    n.fromBufferAttribute(nrm, i).applyMatrix3(nm);
+    const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+    const [u, v] = ax >= ay && ax >= az ? [p.z, p.y] : ay >= az ? [p.x, p.z] : [p.x, p.y];
+    uv[i * 2] = u / texel;
+    uv[i * 2 + 1] = v / texel;
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return geo;
 }
 
 /**

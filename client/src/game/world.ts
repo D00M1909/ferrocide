@@ -42,7 +42,8 @@ export class World {
     // ------------------------------------------------------------ lighting
     // cold ambient from the smoke-choked sky, hot key light from the furnaces
     s.add(new THREE.HemisphereLight(0xaab4c8, 0x161214, 1.05));
-    const sun = new THREE.DirectionalLight(0xff9a50, 1.45);
+    // neutral-cool key light; warmth comes only from the slag, braziers and trim
+    const sun = new THREE.DirectionalLight(0xdce2f0, 1.05);
     sun.position.set(-30, 60, 20);
     s.add(sun);
     const fill = new THREE.DirectionalLight(0x5a70c0, 0.45);

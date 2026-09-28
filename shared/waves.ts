@@ -17,9 +17,10 @@ export const WAVES: WaveDef[] = [
   {
     title: 'FIRST BLOOD',
     groups: [
-      { kind: 'husk', count: 4, delay: 0.5, where: 'ground' },
+      { kind: 'husk', count: 5, delay: 0.5, where: 'ground' },
       { kind: 'eye', count: 3, delay: 4, where: 'air' },
-      { kind: 'husk', count: 4, delay: 7, where: 'ground' },
+      { kind: 'husk', count: 5, delay: 7, where: 'ground' },
+      { kind: 'drone', count: 2, delay: 10, where: 'air' },
     ],
   },
   {
@@ -52,7 +53,8 @@ export const WAVES: WaveDef[] = [
       { kind: 'eye', count: 8, delay: 0.5, where: 'air' },
       { kind: 'drone', count: 3, delay: 3, where: 'air' },
       { kind: 'warden', count: 3, delay: 6, where: 'tower' },
-      { kind: 'husk', count: 6, delay: 9, where: 'ground' },
+      { kind: 'husk', count: 4, delay: 9, where: 'ground' },
+      { kind: 'stalker', count: 2, delay: 11, where: 'ground' },
     ],
   },
   {
@@ -60,6 +62,7 @@ export const WAVES: WaveDef[] = [
     groups: [
       { kind: 'brute', count: 2, delay: 0.5, where: 'ground' },
       { kind: 'warden', count: 4, delay: 4, where: 'tower' },
+      { kind: 'stalker', count: 3, delay: 6, where: 'ground' },
       { kind: 'husk', count: 6, delay: 8, where: 'ground' },
     ],
   },
@@ -71,6 +74,7 @@ export const WAVES: WaveDef[] = [
       { kind: 'brute', count: 2, delay: 7, where: 'ground' },
       { kind: 'eye', count: 8, delay: 10, where: 'air' },
       { kind: 'warden', count: 4, delay: 12, where: 'tower' },
+      { kind: 'stalker', count: 3, delay: 14, where: 'ground' },
     ],
   },
   {

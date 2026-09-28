@@ -72,8 +72,8 @@ export type FxMsg =
 export type EnemySnap = [number, number, number, number, number, number, number, number];
 /** [id, kind index, x, y, z, vx, vy, vz, reflected?1:0] */
 export type ProjSnap = [number, number, number, number, number, number, number, number, number];
-/** [id, x, y, z, vx, vy, vz, yaw, pitch, flags, weapon, hp, alive, hardDamage, connected] */
-export type PlayerSnap = [string, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
+/** [id, x, y, z, vx, vy, vz, yaw, pitch, flags, weapon, hp, alive, hardDamage, connected, revive 0..1, deathX, deathY, deathZ] */
+export type PlayerSnap = [string, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
 
 export interface Snapshot {
   t: number;
@@ -88,7 +88,7 @@ export interface Snapshot {
 
 export type Phase = 'lobby' | 'intermission' | 'combat' | 'over' | 'victory';
 
-export const ENEMY_KINDS: EnemyKind[] = ['husk', 'eye', 'warden', 'drone', 'brute', 'colossus'];
+export const ENEMY_KINDS: EnemyKind[] = ['husk', 'eye', 'warden', 'drone', 'brute', 'colossus', 'stalker'];
 export const PROJ_KINDS: ProjectileKind[] = ['orb', 'bolt', 'mortar', 'reflected'];
 export const ENEMY_STATES = ['spawn', 'move', 'windup', 'attack', 'recover', 'stun', 'dive', 'beam'] as const;
 export type EnemyState = (typeof ENEMY_STATES)[number];
@@ -122,6 +122,7 @@ export type GameEvent =
   | { t: 'parried'; id: number; by: string }
   | { t: 'stun'; id: number; by: string }
   | { t: 'mparry'; id: number; by: string } // punched an enemy mid-swing
+  | { t: 'revive'; pid: string; by: string }
   | { t: 'enrage'; id: number }
   | { t: 'fx'; from: string; fx: FxMsg }
   | { t: 'over'; win: boolean; wave: number; time: number; stats: PlayerStats[] }

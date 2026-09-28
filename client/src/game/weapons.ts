@@ -8,6 +8,7 @@ import { PUNCH, WEAPONS, WEAPON_ORDER, type WeaponId } from '../../../shared/con
 import { raySphere, type Vec3 } from '../../../shared/math';
 import type { FxMsg, HitKind, V } from '../../../shared/protocol';
 import { sprite, staticModel } from '../engine/assets';
+import { psxify, Textures } from '../engine/psx';
 import type { Audio } from '../engine/audio';
 import type { Input } from '../engine/input';
 import type { Motor } from '../../../shared/movement';
@@ -99,9 +100,14 @@ export class Weapons {
       shotgun: this.buildView('shotgun'),
       launcher: this.buildView('launcher'),
     };
-    this.muzzleFlash = new THREE.Sprite(new THREE.SpriteMaterial({ map: sprite('muzzle_02'), color: 0xffe0a0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    // hard star-shaped flash with a white-hot core, shown for a frame or two
+    this.muzzleFlash = new THREE.Sprite(new THREE.SpriteMaterial({ map: sprite('star_04'), color: 0xffd890, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
     this.muzzleFlash.visible = false;
     this.muzzleFlash.renderOrder = 10;
+    const core = new THREE.Sprite(new THREE.SpriteMaterial({ map: sprite('flare_01'), color: 0xffffff, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    core.scale.setScalar(0.45);
+    core.renderOrder = 11;
+    this.muzzleFlash.add(core);
     this.holder.add(this.muzzleFlash);
     this.buildArm();
     this.select('revolver', true);
@@ -121,20 +127,38 @@ export class Weapons {
 
   /** Gloved mechanical hand + forearm gripping each gun from below. */
   private buildHand(w: WeaponId): THREE.Object3D {
-    const glove = new THREE.MeshLambertMaterial({ color: 0x2c2426 });
-    const metal = new THREE.MeshLambertMaterial({ color: 0x6a5e5a });
+    const wear = Textures.gunmetal();
+    const glove = psxify(new THREE.MeshLambertMaterial({ color: 0x3a3032, map: wear }), { snap: false });
+    const metal = psxify(new THREE.MeshLambertMaterial({ color: 0x8a7e78, map: wear }), { snap: false });
     const glow = new THREE.MeshBasicMaterial({ color: 0xff4020 });
     const hand = new THREE.Group();
-    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.09, 0.1), glove);
-    const fingers = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.035, 0.07), glove);
-    fingers.position.set(-0.02, 0.03, -0.06);
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.085, 0.095), glove);
+    hand.add(palm);
+    // four segmented fingers wrapped around the grip + a thumb over the top
+    for (let i = 0; i < 4; i++) {
+      const prox = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.022, 0.045), glove);
+      prox.position.set(-0.045, 0.03 - i * 0.024, -0.02);
+      prox.rotation.y = 0.5;
+      const tip = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, 0.035), glove);
+      tip.position.set(-0.058, 0.03 - i * 0.024, -0.052);
+      tip.rotation.y = 1.3;
+      hand.add(prox, tip);
+    }
+    const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.024, 0.024, 0.06), glove);
+    thumb.position.set(-0.03, 0.055, -0.03);
+    thumb.rotation.set(0.2, 0.6, 0);
+    const knuckles = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.09, 0.016), metal);
+    knuckles.position.set(-0.05, 0, -0.005);
     const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.085, 0.34), metal);
     forearm.position.set(0.02, -0.05, 0.2);
     forearm.rotation.x = 0.35;
+    const cuff = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.05), glove);
+    cuff.position.set(0.015, -0.02, 0.06);
+    cuff.rotation.x = 0.35;
     const vent = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.012, 0.12), glow);
     vent.position.set(0.02, -0.005, 0.2);
     vent.rotation.x = 0.35;
-    hand.add(palm, fingers, forearm, vent);
+    hand.add(thumb, knuckles, forearm, cuff, vent);
     const grip = w === 'revolver' ? [0.0, -0.07, 0.06] : w === 'shotgun' ? [0.0, -0.08, 0.14] : [0.0, -0.09, 0.08];
     hand.position.set(grip[0], grip[1], grip[2]);
     return hand;
@@ -183,7 +207,10 @@ export class Weapons {
   update(dt: number, realDt: number, input: Input, ctx: WeaponCtx, mouse: [number, number]): void {
     for (const k of WEAPON_ORDER) this.cooldowns[k] = Math.max(0, this.cooldowns[k] - realDt);
     this.equipT = Math.max(0, this.equipT - realDt);
+    const pumpBefore = this.pumpT;
     this.pumpT = Math.max(0, this.pumpT - realDt);
+    // the rack sound lands exactly when the pump animation starts pulling back
+    if (pumpBefore > 0.33 && this.pumpT <= 0.33 && this.current === 'shotgun') ctx.audio.play('pump', { volume: 0.55 });
     this.punchCd = Math.max(0, this.punchCd - dt);
     this.coreCd = Math.max(0, this.coreCd - dt);
     this.switchT = Math.max(0, this.switchT - dt);
@@ -230,7 +257,7 @@ export class Weapons {
       ctx.audio.play('revolver', { volume: 0.85, variance: 0.05, reverb: 0.3 });
       ctx.audio.synth('thump', 0.55);
       ctx.fx.shake(0.12);
-      this.flash(0.05, 0.28);
+      this.flash(0.035, 0.34);
       const to = this.hitscan(ctx, ctx.eye, ctx.fwd, WEAPONS.revolver.damage, 'revolver', WEAPONS.revolver.pierce, 0xfff0a0, 0.035);
       ctx.sendFx({ t: 'shot', w: 'revolver', from: v3(this.muzzleWorld(ctx)), to: [v3(to)] });
     } else if (w === 'shotgun') {
@@ -241,9 +268,8 @@ export class Weapons {
       ctx.fx.flashLight(this.muzzleWorld(ctx), 0xffb050, 6, 14, 0.08);
       ctx.audio.play('shotgun', { volume: 1, variance: 0.06, reverb: 0.4 });
       ctx.audio.synth('thump', 1);
-      setTimeout(() => ctx.audio.play('pump', { volume: 0.5 }), 380);
       ctx.fx.shake(0.28);
-      this.flash(0.07, 0.5);
+      this.flash(0.045, 0.6);
       const agg = new Map<EnemyView, { dmg: number; head: boolean; point: Vec3 }>();
       const tos: V[] = [];
       const muzzle = this.muzzleWorld(ctx);
@@ -274,7 +300,7 @@ export class Weapons {
       ctx.audio.play('rocket', { volume: 0.9, reverb: 0.3 });
       ctx.audio.synth('thump', 0.7);
       ctx.fx.shake(0.18);
-      this.flash(0.08, 0.6);
+      this.flash(0.05, 0.55);
       const p = this.muzzleWorld(ctx);
       // aim the rocket at what the crosshair points to
       const aim = this.aimPoint(ctx, 200);
@@ -446,6 +472,7 @@ export class Weapons {
     this.removeCoin(coin);
     ctx.sendFx({ t: 'coinhit', id: coin.id });
     ctx.audio.play('coin', { at: coin.pos, volume: 1, pitch: 1.4 + chain * 0.15 });
+    ctx.audio.play('ricochet', { at: coin.pos, volume: 0.7, pitch: 1 + chain * 0.1, dur: 0.6 });
     ctx.fx.glow(coin.pos, 1.6, COLORS.silver, 0.2);
     ctx.fx.sparks(coin.pos, 12, 8, COLORS.silver, 0.1);
     ctx.fx.freeze(0.035);

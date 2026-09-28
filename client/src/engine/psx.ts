@@ -267,28 +267,58 @@ export const Textures = {
     }, 19),
   sky: () =>
     makeTex(128, (ctx, s, rnd) => {
+      // a clean smoke-choked gradient: near-black zenith, ember glow on the horizon
       const g = ctx.createLinearGradient(0, 0, 0, s);
-      g.addColorStop(0, '#050102');
-      g.addColorStop(0.45, '#2a0503');
-      g.addColorStop(0.62, '#7a1a05');
-      g.addColorStop(0.7, '#1a0302');
-      g.addColorStop(1, '#050101');
+      g.addColorStop(0, '#040305');
+      g.addColorStop(0.4, '#0d090b');
+      g.addColorStop(0.6, '#2a0e08');
+      g.addColorStop(0.67, '#4a1a0a');
+      g.addColorStop(0.72, '#120806');
+      g.addColorStop(1, '#040303');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, s, s);
-      for (let i = 0; i < 90; i++) {
-        ctx.fillStyle = `rgba(255,${80 + rnd() * 120},20,${0.1 + rnd() * 0.4})`;
-        ctx.fillRect(rnd() * s, s * 0.2 + rnd() * s * 0.45, 1, 1);
+      // soft smoke bands
+      for (let i = 0; i < 6; i++) {
+        ctx.fillStyle = `rgba(20,16,18,${0.25 + rnd() * 0.25})`;
+        ctx.fillRect(0, s * (0.25 + rnd() * 0.35), s, 2 + rnd() * 4);
       }
-      // distant smokestacks
-      for (let i = 0; i < 14; i++) {
-        const x = rnd() * s, w = 2 + rnd() * 5, h = 10 + rnd() * 26;
-        ctx.fillStyle = '#080203';
-        ctx.fillRect(x, s * 0.68 - h, w, h);
-        ctx.fillStyle = '#ff5010';
-        ctx.fillRect(x, s * 0.68 - h, w, 1);
+      // distant smokestack silhouettes on the horizon band
+      for (let i = 0; i < 16; i++) {
+        const x = rnd() * s, w = 2 + rnd() * 5, h = 8 + rnd() * 22;
+        ctx.fillStyle = '#060304';
+        ctx.fillRect(x, s * 0.7 - h, w, h);
+        ctx.fillStyle = '#b8400c';
+        ctx.fillRect(x, s * 0.7 - h, w, 1);
       }
-      noise(ctx, s, rnd, 10, false);
     }, 23),
+  /** Worn gun steel: neutral so the model's own material colour tints it. */
+  gunmetal: () =>
+    makeTex(64, (ctx, s, rnd) => {
+      ctx.fillStyle = '#c8c8c8';
+      ctx.fillRect(0, 0, s, s);
+      // brushed streaks
+      for (let i = 0; i < 70; i++) {
+        ctx.fillStyle = `rgba(${rnd() < 0.5 ? '255,255,255' : '40,40,40'},${0.05 + rnd() * 0.12})`;
+        ctx.fillRect(0, rnd() * s, s, 1);
+      }
+      // panel seams + rivets
+      ctx.fillStyle = 'rgba(20,20,20,0.55)';
+      ctx.fillRect(0, s / 2, s, 1);
+      ctx.fillRect(s / 3, 0, 1, s);
+      for (let i = 0; i < 6; i++) ctx.fillRect(4 + i * 10, s / 2 + 3, 2, 2);
+      // edge wear and scratches
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      for (let i = 0; i < 12; i++) {
+        ctx.beginPath();
+        const x = rnd() * s, y = rnd() * s;
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + (rnd() - 0.5) * 14, y + (rnd() - 0.5) * 6);
+        ctx.stroke();
+      }
+      grime(ctx, s, rnd, 18, '#1a1414');
+      grime(ctx, s, rnd, 4, '#5a2a10');
+      noise(ctx, s, rnd, 26, false);
+    }, 31),
   pad: () =>
     makeTex(32, (ctx, s) => {
       ctx.clearRect(0, 0, s, s);

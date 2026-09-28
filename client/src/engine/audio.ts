@@ -3,6 +3,7 @@
 // adaptive music with true per-track crossfades, gapless loops, and a
 // low-pass that opens up in combat. Everything ends in a master limiter.
 import type { Vec3 } from '../../../shared/math';
+import { MusicEngine, type TrackId } from './music';
 
 type SfxName = string;
 
@@ -35,15 +36,16 @@ const SFX_FILES: Record<string, string[]> = {
   blip: ['ui_blip.ogg'],
   door: ['door.ogg'],
   clank: ['clank.ogg'],
+  // creature vocals (Pixabay) — pitched per enemy, clipped to short barks
+  growl: ['growl1.mp3', 'growl2.mp3', 'growl3.mp3', 'growl4.mp3'],
+  scream: ['scream1.mp3'],
+  roar: ['roar1.mp3'],
+  edeath: ['death1.mp3', 'death2.mp3'],
+  ping: ['ping.mp3'],
+  ricochet: ['ricochet.mp3'],
 };
 
-export const MUSIC = {
-  menu: 'menu_dark_ambient.mp3',
-  combat1: 'combat_heavy_industrial_metal.mp3',
-  combat2: 'combat_industrial_jent_metal.mp3',
-  boss: 'boss_runaway_breakcore.mp3',
-} as const;
-export type MusicId = keyof typeof MUSIC;
+export type MusicId = TrackId;
 
 export interface PlayOpts {
   volume?: number;
@@ -52,6 +54,8 @@ export interface PlayOpts {
   at?: Vec3;
   maxDist?: number;
   reverb?: number; // send amount 0..1
+  dur?: number; // cut the sample off (with a short fade) after this many seconds
+  offset?: number; // start this far into the sample
 }
 
 type SynthKind = 'tick' | 'kill' | 'rankup' | 'jump' | 'land' | 'heal' | 'dash' | 'denied' | 'charge' | 'beep' | 'thump' | 'boom';
@@ -64,10 +68,7 @@ export class Audio {
   private reverbSend: GainNode;
   private musicFilter: BiquadFilterNode;
   private buffers = new Map<string, AudioBuffer[]>();
-  private musicBuffers = new Map<string, AudioBuffer>();
-  private musicLoads = new Map<string, Promise<void>>();
-  private current: { id: MusicId; src: AudioBufferSourceNode; gain: GainNode } | null = null;
-  private wantMusic: MusicId | null = null;
+  private music: MusicEngine;
   private listener = { pos: { x: 0, y: 0, z: 0 }, yaw: 0 };
   private recent = new Map<string, number>();
   private noiseBuf: AudioBuffer;
@@ -106,6 +107,20 @@ export class Audio {
     this.musicFilter.Q.value = 0.5;
     this.musicFilter.connect(this.musicBus);
     this.musicBus.connect(this.master);
+    // original soundtrack, composed + synthesised live (see music.ts); the engine's own
+    // output level is modest so it sits under the gunfire instead of on top of it
+    const musicOut = this.ctx.createGain();
+    musicOut.gain.value = 0.55;
+    musicOut.connect(this.musicFilter);
+    const musicVerb = this.ctx.createConvolver();
+    musicVerb.buffer = this.makeImpulse(2.8, 3.2); // a bigger, darker hall for the score
+    const verbIn = this.ctx.createGain();
+    verbIn.gain.value = 0.5;
+    const verbLp = this.ctx.createBiquadFilter();
+    verbLp.type = 'lowpass';
+    verbLp.frequency.value = 4000;
+    verbIn.connect(verbLp).connect(musicVerb).connect(musicOut);
+    this.music = new MusicEngine(this.ctx, musicOut, verbIn);
 
     this.noiseBuf = this.ctx.createBuffer(1, this.ctx.sampleRate, this.ctx.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
@@ -146,19 +161,6 @@ export class Audio {
       }
     }
     await Promise.all(jobs);
-    // stream every music track in the background so wave transitions never stall
-    for (const id of Object.keys(MUSIC) as MusicId[]) void this.loadMusic(id);
-  }
-
-  loadMusic(id: MusicId): Promise<void> {
-    let p = this.musicLoads.get(id);
-    if (!p) {
-      p = this.fetchBuffer(`/assets/music/${MUSIC[id]}`).then((b) => {
-        if (b) this.musicBuffers.set(id, trimSilence(this.ctx, b));
-      });
-      this.musicLoads.set(id, p);
-    }
-    return p;
   }
 
   private async fetchBuffer(url: string): Promise<AudioBuffer | null> {
@@ -209,14 +211,20 @@ export class Audio {
       out = pan;
     }
     g.gain.value = vol;
-    src.connect(g);
+    const fade = this.ctx.createGain();
+    src.connect(fade).connect(g);
     out.connect(this.sfxBus);
     if (rev > 0.01) {
       const send = this.ctx.createGain();
       send.gain.value = rev * vol;
-      src.connect(send).connect(this.reverbSend);
+      fade.connect(send).connect(this.reverbSend);
     }
-    src.start();
+    src.start(now, o.offset ?? 0);
+    if (o.dur) {
+      fade.gain.setValueAtTime(1, now + o.dur * 0.7);
+      fade.gain.linearRampToValueAtTime(0, now + o.dur);
+      src.stop(now + o.dur + 0.02);
+    }
   }
 
   /** Procedural layers: gun thumps, UI, movement feedback. */
@@ -310,41 +318,20 @@ export class Audio {
     lfo.stop(t + dur + 0.05);
   }
 
-  /** Crossfade to a track; each track has its own gain so both can overlap. */
-  async playMusic(id: MusicId | null, fade = 1.5): Promise<void> {
-    if (id === this.wantMusic) return;
-    this.wantMusic = id;
-    const t = this.ctx.currentTime;
-    const old = this.current;
-    if (old) {
-      old.gain.gain.cancelScheduledValues(t);
-      old.gain.gain.setValueAtTime(old.gain.gain.value, t);
-      old.gain.gain.linearRampToValueAtTime(0, t + fade);
-      old.src.stop(t + fade + 0.05);
-      this.current = null;
-    }
-    if (!id) return;
-    await this.loadMusic(id);
-    if (this.wantMusic !== id) return;
-    const buf = this.musicBuffers.get(id);
-    if (!buf) return;
-    const src = this.ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = true;
-    const gain = this.ctx.createGain();
-    src.connect(gain).connect(this.musicFilter);
-    const now = this.ctx.currentTime;
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(id === 'menu' ? 0.75 : 0.6, now + fade);
-    src.start();
-    this.current = { id, src, gain };
+  /** Crossfade to a piece of the procedural soundtrack. */
+  async playMusic(id: MusicId | null, fade = 2): Promise<void> {
+    this.music.play(id, fade);
   }
 
-  /** 0 = calm (muffled), 1 = full intensity. Combat sits around 10 kHz+. */
+  /**
+   * 0 = calm (pads only, slightly muffled) … 1 = full band. Stems fade in with
+   * intensity, so the music builds with the fight instead of blasting constantly.
+   */
   setIntensity(v: number): void {
     const x = Math.max(0, Math.min(1, v));
-    const f = 500 * Math.pow(20000 / 500, x);
-    this.musicFilter.frequency.setTargetAtTime(f, this.ctx.currentTime, 0.4);
+    this.music.setIntensity(x);
+    const f = 2500 * Math.pow(20000 / 2500, Math.min(1, x * 1.6));
+    this.musicFilter.frequency.setTargetAtTime(f, this.ctx.currentTime, 0.5);
   }
 
   /** Duck music briefly (big hits, parries). */
@@ -354,19 +341,4 @@ export class Audio {
     this.musicBus.gain.setValueAtTime(this.musicVolume * amount, t);
     this.musicBus.gain.linearRampToValueAtTime(this.musicVolume, t + time);
   }
-}
-
-/** Strip encoder padding/silence at both ends so loops are seamless. */
-function trimSilence(ctx: AudioContext, b: AudioBuffer): AudioBuffer {
-  const ch = b.getChannelData(0);
-  const thr = 0.002;
-  let s = 0;
-  while (s < ch.length && Math.abs(ch[s]) < thr) s++;
-  let e = ch.length - 1;
-  while (e > s && Math.abs(ch[e]) < thr) e--;
-  if (s === 0 && e === ch.length - 1) return b;
-  const len = Math.max(1, e - s + 1);
-  const out = ctx.createBuffer(b.numberOfChannels, len, b.sampleRate);
-  for (let c = 0; c < b.numberOfChannels; c++) out.copyToChannel(b.getChannelData(c).subarray(s, s + len), c);
-  return out;
 }

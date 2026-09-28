@@ -17,6 +17,7 @@ export class StyleMeter {
   feed: StyleEntry[] = [];
   private lastLabels: string[] = [];
   private freshness = new Map<string, number>(); // weapon -> 0.5..1.5
+  private lastWeapon = '';
   onRankChange: ((rank: number, up: boolean) => void) | null = null;
   private lastRank = 0;
   private time = 0;
@@ -40,15 +41,9 @@ export class StyleMeter {
       this.lastLabels.push(label);
       if (this.lastLabels.length > 8) this.lastLabels.shift();
     }
-    if (weapon) {
-      const f = this.freshness.get(weapon) ?? 1.5;
-      mult *= f;
-      // the weapon you just used goes stale, the others recover
-      for (const [w, v] of this.freshness) this.freshness.set(w, Math.min(1.5, v + 0.25));
-      this.freshness.set(weapon, Math.max(0.5, f - 0.35));
-    }
+    if (weapon) mult *= this.freshnessOf(weapon);
     const gain = pts * mult;
-    this.meter = Math.min(RANKS.length * 100 - 1, this.meter + gain * Math.max(0.25, 0.7 - this.rank * 0.06));
+    this.meter = Math.min(RANKS.length * 100 - 1, this.meter + gain * Math.max(0.15, 0.7 - this.rank * 0.07));
     this.total += gain;
     this.feed.unshift({ id: this.nextId++, label: weapon && mult > 1.2 ? `${label} · FRESH` : label, pts: Math.round(gain), big, t: this.time });
     if (this.feed.length > 7) this.feed.pop();
@@ -59,21 +54,30 @@ export class StyleMeter {
     return this.freshness.get(weapon) ?? 1.5;
   }
 
+  /** Every point of damage a weapon deals makes it staler; idle weapons freshen back up. */
+  noteDamage(weapon: string, dmg: number): void {
+    this.freshness.set(weapon, Math.max(0.5, this.freshnessOf(weapon) - dmg * 0.006));
+    this.lastWeapon = weapon;
+  }
+
   /** Continuous trickle for damage dealt. */
   trickle(pts: number): void {
-    this.meter = Math.min(RANKS.length * 100 - 1, this.meter + pts * Math.max(0.25, 0.65 - this.rank * 0.06));
+    this.meter = Math.min(RANKS.length * 100 - 1, this.meter + pts * Math.max(0.15, 0.6 - this.rank * 0.07));
     this.total += pts * 0.5;
     this.checkRank();
   }
 
   hurt(dmg: number): void {
-    this.meter = Math.max(0, this.meter - dmg * 3.2);
+    this.meter = Math.max(0, this.meter - dmg * 5);
     this.checkRank();
   }
 
   update(dt: number, inCombat: boolean): void {
     this.time += dt;
-    if (inCombat) this.meter = Math.max(0, this.meter - dt * (4 + this.rank * 2.2));
+    for (const w of ['revolver', 'shotgun', 'launcher']) {
+      if (w !== this.lastWeapon) this.freshness.set(w, Math.min(1.5, this.freshnessOf(w) + dt * 0.1));
+    }
+    if (inCombat) this.meter = Math.max(0, this.meter - dt * (4 + this.rank * 3.5));
     else this.meter = Math.max(0, this.meter - dt * 14);
     this.feed = this.feed.filter((f) => this.time - f.t < 4);
     this.checkRank();
