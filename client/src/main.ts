@@ -146,6 +146,7 @@ function mainMenu(error = ''): void {
         <div class="section-label">SYSTEM</div>
         <div class="row"><button id="settings" style="flex:1">SETTINGS</button><button id="controls" style="flex:1">CONTROLS</button></div>
         <div class="err" id="err">${esc(error)}</div>
+        ${game?.renderer.softwareRendering ? '<div class="err">HARDWARE ACCELERATION IS OFF: the game will run slowly. Turn on "Use graphics acceleration when available" in your browser settings, then restart the browser.</div>' : ''}
       </div>
     </div>
     <div class="menu-right">
@@ -221,7 +222,10 @@ function settingsScreen(back: () => void): void {
       </select><span></span></div>
       <div class="setting"><span>DITHERING</span><input type="checkbox" id="dither" ${s.dither ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>INVERT Y</span><input type="checkbox" id="inv" ${s.invertY ? 'checked' : ''}><span></span></div>
-      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: ${esc(game?.renderer.gpuName ?? 'unknown')}<br>Low FPS? Check this is your graphics card, not "Intel/AMD Radeon Graphics".</div>
+      <div class="setting"><span>SHOW FPS</span><input type="checkbox" id="fpsbox" ${s.showFps ? 'checked' : ''}><span></span></div>
+      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>
+        LOW FPS? 1) Turn on <b style="color:#fff">hardware acceleration</b> in your browser (Settings → System → "Use graphics acceleration when available") and restart it.
+        2) Make sure the GPU above is your graphics card, not "Intel/AMD Radeon Graphics" or "SwiftShader". 3) Lower the render resolution.</div>
       <div style="margin-top:14px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
@@ -248,6 +252,7 @@ function settingsScreen(back: () => void): void {
   el.querySelector<HTMLSelectElement>('#res')!.addEventListener('change', (e) => { settings.resolution = Number((e.target as HTMLSelectElement).value); apply(); });
   el.querySelector<HTMLInputElement>('#dither')!.addEventListener('change', (e) => { settings.dither = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector<HTMLInputElement>('#inv')!.addEventListener('change', (e) => { settings.invertY = (e.target as HTMLInputElement).checked; apply(); });
+  el.querySelector<HTMLInputElement>('#fpsbox')!.addEventListener('change', (e) => { settings.showFps = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector('#back')!.addEventListener('click', () => { blip(); back(); });
   escBack(el, back);
 }

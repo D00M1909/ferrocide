@@ -128,7 +128,7 @@ export class HUD {
   update(dt: number, s: {
     hp: number; hard: number; stamina: number; weapon: WeaponId; coins: number; coreCd: number; style: StyleMeter;
     wave: number; waves: number; title: string; left: number; phase: string; timer: number;
-    boss: { hp: number; max: number } | null; ping: number; online: boolean;
+    boss: { hp: number; max: number } | null; ping: number; online: boolean; fps: number | null;
   }): void {
     // health: bright = current, dark red = hard damage (not healable yet), white = recent loss
     const hp = Math.max(0, s.hp);
@@ -192,7 +192,10 @@ export class HUD {
     this.splatT = Math.max(0, this.splatT - dt);
     this.splat.style.opacity = String(Math.min(0.85, this.splatT * 0.7));
     for (const a of this.dmgArcs) a.style.opacity = String(Math.max(0, Number(a.style.opacity || 0) - dt * 1.5));
-    this.net.textContent = s.online ? `${Math.round(s.ping)} ms` : '';
+    const parts: string[] = [];
+    if (s.fps !== null) parts.push(`${Math.round(s.fps)} FPS`);
+    if (s.online) parts.push(`${Math.round(s.ping)} MS`);
+    this.net.textContent = parts.join(' · ');
   }
 
   /** Only add/remove changed rows so the CSS entrance animation plays once per entry. */

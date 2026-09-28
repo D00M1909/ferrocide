@@ -9,6 +9,7 @@ export interface Settings {
   dither: boolean;
   shake: number;
   invertY: boolean;
+  showFps: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -22,6 +23,7 @@ const DEFAULTS: Settings = {
   dither: true,
   shake: 1,
   invertY: false,
+  showFps: false,
 };
 
 const KEY = 'ferrocide.settings.v1';

@@ -710,6 +710,7 @@ export class Game {
     this.updateCamera(dt);
     this.updatePost(dt);
     this.hud.update(dt, {
+      fps: this.settings.showFps ? this.fps : null,
       hp: this.hp, hard: this.hard, stamina: this.motor.stamina, weapon: this.weapons.current, coins: this.weapons.coins,
       coreCd: this.weapons.coreCd, style: this.style, wave: this.wave, waves: WAVES.length,
       title: WAVES[this.wave - 1]?.title ?? '', left: this.waveLeft, phase: this.phase,
