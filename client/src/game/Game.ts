@@ -536,7 +536,10 @@ export class Game {
       return;
     }
     const link = this.link!;
-    if (this.input.pausePressed() && !this.bot) this.setPaused(!this.paused);
+    // Esc only ever pauses. Un-pausing happens when the mouse is captured again (Resume or a
+    // click), because browsers refuse pointer lock from an Esc press and the game would otherwise
+    // run on with a dead mouse.
+    if (this.input.pausePressed() && !this.bot && !this.paused) { this.setPaused(true); this.input.exitLock(); }
     const soloPaused = this.paused && !link.online;
     // hitstop slows the world (and freezes its view), never the network
     let worldDt = dt;

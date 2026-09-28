@@ -97,6 +97,10 @@ async function boot(): Promise<void> {
       game.setPaused(true);
     }
   });
+  // safety net: if the game is running but the mouse isn't captured, a click on it recaptures
+  canvas.addEventListener('mousedown', () => {
+    if (game.mode === 'play' && !botMode && !screen && !pauseEl && !clickGate && document.pointerLockElement !== canvas) input.requestLock();
+  });
   const auto = params.get('autostart');
   if (auto === 'solo') startSolo();
   else if (auto === 'host') void startOnline('host');
@@ -168,6 +172,16 @@ function controlsScreen(back: () => void): void {
     </div>`);
   show(el);
   el.querySelector('#back')!.addEventListener('click', () => { blip(); back(); });
+  escBack(el, back);
+}
+
+/** Esc on a sub-screen goes back one level (the listener dies with the screen). */
+function escBack(el: HTMLElement, back: () => void): void {
+  const onKey = (e: KeyboardEvent) => {
+    if (!el.isConnected) { window.removeEventListener('keydown', onKey); return; }
+    if (e.code === 'Escape') { window.removeEventListener('keydown', onKey); back(); }
+  };
+  window.addEventListener('keydown', onKey);
 }
 
 function settingsScreen(back: () => void): void {
@@ -213,6 +227,7 @@ function settingsScreen(back: () => void): void {
   el.querySelector<HTMLInputElement>('#dither')!.addEventListener('change', (e) => { settings.dither = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector<HTMLInputElement>('#inv')!.addEventListener('change', (e) => { settings.invertY = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector('#back')!.addEventListener('click', () => { blip(); back(); });
+  escBack(el, back);
 }
 
 // ------------------------------------------------------------------ sessions

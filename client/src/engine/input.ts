@@ -84,13 +84,9 @@ export class Input {
   /** Pointer lock + (best effort) fullscreen keyboard lock so Ctrl+W can't close the tab mid-slide. */
   requestLock(): void {
     if (this.virtual) return;
-    const c = this.canvas as HTMLCanvasElement & { requestPointerLock(o?: { unadjustedMovement?: boolean }): Promise<void> | void };
-    try {
-      const r = c.requestPointerLock({ unadjustedMovement: true });
-      if (r && typeof (r as Promise<void>).catch === 'function') (r as Promise<void>).catch(() => c.requestPointerLock());
-    } catch {
-      c.requestPointerLock();
-    }
+    // plain lock: raw 'unadjustedMovement' input could come back silent after fullscreen changes
+    const r = this.canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+    r?.catch?.(() => undefined);
     const nav = navigator as Navigator & { keyboard?: { lock(keys?: string[]): Promise<void> } };
     if (document.fullscreenElement && nav.keyboard) void nav.keyboard.lock(['KeyW', 'KeyS', 'KeyD', 'ControlLeft']).catch(() => undefined);
   }

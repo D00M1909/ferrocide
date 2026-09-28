@@ -18,7 +18,7 @@ const DEFAULTS: Settings = {
   master: 0.8,
   music: 0.5,
   sfx: 0.9,
-  resolution: 360,
+  resolution: 480,
   dither: true,
   shake: 1,
   invertY: false,
