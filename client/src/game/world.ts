@@ -84,12 +84,14 @@ export class World {
     }
 
     // ------------------------------------------------------------ molten slag
-    this.lavaMat = new THREE.MeshBasicMaterial({ map: Textures.lava(), color: 0xffffff, fog: false });
+    // The floor slab under the slag is a few huge vertex-snapped triangles whose depth wobbles as
+    // the camera moves; a depth bias keeps it from flickering through as dark patches.
+    this.lavaMat = new THREE.MeshBasicMaterial({ map: Textures.lava(), color: 0xffffff, fog: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8 });
     this.lavaMat.map!.repeat.set(2, 2);
     for (const z of LAVA) {
       const w = z.max.x - z.min.x, d = z.max.z - z.min.z;
       const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d).rotateX(-Math.PI / 2), this.lavaMat);
-      m.position.set((z.min.x + z.max.x) / 2, 0.03, (z.min.z + z.max.z) / 2);
+      m.position.set((z.min.x + z.max.x) / 2, 0.06, (z.min.z + z.max.z) / 2);
       s.add(m);
       // dark rim
       const rimMat = new THREE.MeshLambertMaterial({ color: 0x140606 });

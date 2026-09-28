@@ -84,10 +84,42 @@ export class LocalLink implements NetLink {
 export function serverUrl(): string {
   const q = new URLSearchParams(location.search).get('server');
   if (q) return q;
+  // hosted: the static client (Cloudflare Pages) talks to a separate game server set at build time
+  const built = import.meta.env.VITE_SERVER_URL as string | undefined;
+  if (built) return built.replace(/\/$/, '');
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // dev: vite on 5173, game server on 2567. prod: same origin.
+  // dev: vite on 5173, game server on 2567. self-hosted build: same origin.
   if (location.port === '5173') return `${proto}://${location.hostname}:2567`;
   return `${proto}://${location.host}`;
+}
+
+/** The game server's HTTP base (health checks, presence). */
+export function serverHttp(): string {
+  return serverUrl().replace(/^ws/, 'http');
+}
+
+/**
+ * Free hosting puts an idle game server to sleep; waking it takes up to a minute. Pings /health
+ * until it answers, reporting progress so the menu can say what's happening instead of failing.
+ */
+export async function wakeServer(onWaiting: (seconds: number) => void, timeout = 100): Promise<boolean> {
+  const t0 = performance.now();
+  for (;;) {
+    const ctl = new AbortController();
+    const abort = setTimeout(() => ctl.abort(), 4000);
+    try {
+      const r = await fetch(`${serverHttp()}/health`, { signal: ctl.signal, cache: 'no-store' });
+      if (r.ok) return true;
+    } catch {
+      /* asleep or unreachable: keep knocking */
+    } finally {
+      clearTimeout(abort);
+    }
+    const waited = (performance.now() - t0) / 1000;
+    if (waited > timeout) return false;
+    onWaiting(Math.round(waited));
+    await new Promise((r) => setTimeout(r, 2000));
+  }
 }
 
 /** Co-op over Colyseus. */

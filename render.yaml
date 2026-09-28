@@ -1,0 +1,17 @@
+# Co-op game server on Render (free). The browser client is hosted separately on Cloudflare
+# Pages and connects here over WebSockets; solo play never needs this server.
+services:
+  - type: web
+    name: ferrocide-server
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --omit=dev
+    startCommand: npx tsx server/index.ts
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: STATUS_KEY
+        generateValue: true

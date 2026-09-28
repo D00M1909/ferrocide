@@ -8,7 +8,7 @@ import { Audio } from './engine/audio';
 import { Input } from './engine/input';
 import { Game, type GameOverInfo } from './game/Game';
 import { finalGrade } from './game/style';
-import { ColyseusLink, LocalLink, type NetLink } from './net/link';
+import { ColyseusLink, LocalLink, serverHttp, wakeServer, type NetLink } from './net/link';
 import { loadSettings, saveSettings, type Settings } from './settings';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -111,15 +111,17 @@ async function boot(): Promise<void> {
 
 /** Heartbeat to the game server's /status page (the only way it sees solo players). */
 function startPresence(): void {
-  if (location.port === '5173' || botMode) return; // dev server: no status page there
+  if (location.port === '5173' || botMode) return; // dev: no status page worth feeding
   const id = Math.random().toString(36).slice(2, 12);
   const send = (bye = false) => {
     const body = JSON.stringify({
       id, bye, name: settings.name, wave: game.wave, phase: game.phase,
       mode: game.mode === 'menu' ? 'menu' : game.link?.online ? 'co-op' : 'solo',
     });
-    if (bye) navigator.sendBeacon?.('/presence', new Blob([body], { type: 'application/json' }));
-    else void fetch('/presence', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => undefined);
+    // text/plain keeps it a CORS "simple" request (no preflight) now that the server lives elsewhere
+    const url = `${serverHttp()}/presence`;
+    if (bye) navigator.sendBeacon?.(url, new Blob([body], { type: 'text/plain' }));
+    else void fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, keepalive: true }).catch(() => undefined);
   };
   send();
   setInterval(() => send(), 10_000);
@@ -264,11 +266,15 @@ async function startOnline(mode: 'host' | 'join', code = ''): Promise<void> {
   if (mode === 'join' && code.trim().length !== 4) { mainMenu('Enter the 4-letter room code your partner sees.'); return; }
   show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
   let res: { link: ColyseusLink; welcome: WelcomeMsg };
+  const awake = await wakeServer((s) => {
+    screen?.querySelector('.loading')?.replaceChildren(`WAKING THE CO-OP SERVER… ${s}s`, h('<div class="hint">The free server naps when nobody is playing. First connection can take up to a minute.</div>'));
+  });
+  if (!awake) { mainMenu('The co-op server did not wake up. Try again in a minute (solo always works).'); return; }
   try {
     res = await ColyseusLink.connect(mode, settings.name || 'SLAYER', code);
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
-    mainMenu(mode === 'join' ? `Could not join ${code.toUpperCase()}: ${/not found|locked|full/i.test(msg) ? 'room is full, closed or does not exist.' : msg}` : `Could not reach the game server (${msg}). Is it running? (npm run dev)`);
+    mainMenu(mode === 'join' ? `Could not join ${code.toUpperCase()}: ${/not found|locked|full/i.test(msg) ? 'room is full, closed or does not exist.' : msg}` : `Could not reach the co-op server (${msg}). Try again in a moment; solo always works.`);
     return;
   }
   lobbyPlayers = res.welcome.players;
