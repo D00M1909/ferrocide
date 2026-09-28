@@ -178,6 +178,8 @@ export class Game {
     this.hp = PLAYER.maxHealth;
     this.hard = 0;
     this.alive = true;
+    this.deadT = 0;
+    this.hud.setCenter(''); // a death message from the previous run must not carry over
     this.style.reset();
     this.style.total = 0;
     this.hud.show(true);

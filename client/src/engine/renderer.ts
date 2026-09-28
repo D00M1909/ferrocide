@@ -102,6 +102,16 @@ export class RetroRenderer {
     psxUniforms.uSnap.value.set(iw / 2, ih / 2);
   }
 
+  /** The GPU the browser actually gave us (browsers on dual-GPU laptops often pick the weak one). */
+  get gpuName(): string {
+    const ctx = this.gl.getContext();
+    const ext = ctx.getExtension('WEBGL_debug_renderer_info');
+    const raw = ext ? String(ctx.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : String(ctx.getParameter(ctx.RENDERER));
+    // "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU (0x...) Direct3D11 ...)" -> the card name
+    const m = raw.match(/ANGLE \([^,]*,\s*([^,(]+)/);
+    return (m ? m[1] : raw).trim();
+  }
+
   get aspect(): number {
     return window.innerWidth / window.innerHeight;
   }

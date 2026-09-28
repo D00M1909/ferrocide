@@ -221,6 +221,7 @@ function settingsScreen(back: () => void): void {
       </select><span></span></div>
       <div class="setting"><span>DITHERING</span><input type="checkbox" id="dither" ${s.dither ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>INVERT Y</span><input type="checkbox" id="inv" ${s.invertY ? 'checked' : ''}><span></span></div>
+      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: ${esc(game?.renderer.gpuName ?? 'unknown')}<br>Low FPS? Check this is your graphics card, not "Intel/AMD Radeon Graphics".</div>
       <div style="margin-top:14px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
