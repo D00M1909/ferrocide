@@ -1,0 +1,7 @@
+// Cloudflare Workers static hosting for the browser client (built by `npm run build:cloud`).
+// The co-op server runs separately on Render (see render.yaml); solo play needs no server.
+{
+  "name": "ferrocide",
+  "compatibility_date": "2026-09-01",
+  "assets": { "directory": "./dist" }
+}

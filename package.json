@@ -9,7 +9,8 @@
     "start": "tsx server/index.ts",
     "typecheck": "tsc --noEmit",
     "assets": "node tools/prepare-assets.mjs",
-    "capture": "node tools/capture.mjs"
+    "capture": "node tools/capture.mjs",
+    "build:cloud": "vite build --mode cloud"
   },
   "dependencies": {
     "@colyseus/sdk": "^0.18.4",

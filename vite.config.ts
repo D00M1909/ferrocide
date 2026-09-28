@@ -3,6 +3,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   root: 'client',
   publicDir: 'public',
+  envDir: '..', // .env.cloud lives at the repo root
   build: {
     outDir: '../dist',
     emptyOutDir: true,
