@@ -256,9 +256,11 @@ export function staticModel(name: ModelName, length: number, psx: PsxOptions = {
 }
 
 // The auto-orientation guesses wrong on these (checked by rendering each gun side-on):
-// the revolver came out grip-up, the launcher grip-up with its rocket noses facing the player.
+// the revolver and shotgun came out trigger-guard-up, the launcher grip-up with its rocket
+// noses facing the player.
 const GUN_FIX: Partial<Record<ModelName, THREE.Euler>> = {
   revolver_a: new THREE.Euler(0, 0, Math.PI),
+  shotgun_b: new THREE.Euler(0, 0, Math.PI),
   rocket_launcher: new THREE.Euler(Math.PI, 0, 0),
 };
 
