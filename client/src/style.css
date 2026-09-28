@@ -724,13 +724,23 @@ label.small {
   opacity: 0;
   transform-origin: 60px 190px;
 }
+.fps-counter {
+  position: absolute;
+  left: 28px;
+  top: 2px;
+  font-family: 'Pixel', monospace;
+  font-size: 14px;
+  color: #7dff9a;
+  text-shadow: 1px 1px 0 #000;
+  display: none;
+}
 .net {
   position: absolute;
   right: 12px;
   bottom: 10px;
   font-family: 'Pixel', monospace;
-  font-size: 12px;
-  color: #9a9ca6;
+  font-size: 11px;
+  color: #777;
 }
 .killfeed {
   position: absolute;

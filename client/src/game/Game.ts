@@ -339,6 +339,7 @@ export class Game {
           if (!h) break;
           const at = { x: h.pos.x, y: h.pos.y + 1, z: h.pos.z };
           this.fx.flashLight(at, 0xff2a2a, h.large ? 5 : 3.5, h.large ? 9 : 6, 0.3);
+          this.world.pickupBurst(e.i);
           this.audio.play('forcefield', { at, volume: 0.25, pitch: h.large ? 1.1 : 1.5, dur: 0.35 });
           if (e.pid !== me) {
             // seen from outside: the crystal shatters, shards burst out and embers rise

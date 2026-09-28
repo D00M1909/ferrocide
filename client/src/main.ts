@@ -223,9 +223,7 @@ function settingsScreen(back: () => void): void {
       <div class="setting"><span>DITHERING</span><input type="checkbox" id="dither" ${s.dither ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>INVERT Y</span><input type="checkbox" id="inv" ${s.invertY ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>SHOW FPS</span><input type="checkbox" id="fpsbox" ${s.showFps ? 'checked' : ''}><span></span></div>
-      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>
-        LOW FPS? 1) Turn on <b style="color:#fff">hardware acceleration</b> in your browser (Settings → System → "Use graphics acceleration when available") and restart it.
-        2) Make sure the GPU above is your graphics card, not "Intel/AMD Radeon Graphics" or "SwiftShader". 3) Lower the render resolution.</div>
+      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>LOW FPS? TURN ON HARDWARE ACCELERATION IN YOUR BROWSER SETTINGS.</div>
       <div style="margin-top:14px"><button id="back">BACK</button></div>
     </div>`);
   show(el);

@@ -28,7 +28,7 @@ export class World {
   readonly scene = new THREE.Scene();
   private lavaMat: THREE.MeshBasicMaterial;
   private padRings: THREE.Mesh[] = [];
-  private pickups: { core: THREE.Object3D; light: THREE.PointLight; glow: THREE.Sprite; baseY: number; on: boolean; pop: number }[] = [];
+  private pickups: { core: THREE.Object3D; light: THREE.PointLight; lightI: number; glow: THREE.Sprite; ring: THREE.Mesh; ringT: number; baseY: number; on: boolean; pop: number }[] = [];
   private embers: THREE.Points;
   private emberVel: Float32Array;
   private flames: THREE.Sprite[] = [];
@@ -151,10 +151,19 @@ export class World {
       glow.scale.setScalar(size * 6);
       glow.position.copy(core.position);
       s.add(glow);
-      const light = new THREE.PointLight(0xff2a2a, h.large ? 8 : 5, 6, 1.5);
+      const lightI = h.large ? 8 : 5;
+      const light = new THREE.PointLight(0xff2a2a, lightI, 6, 1.5);
       light.position.copy(core.position);
       s.add(light);
-      this.pickups.push({ core, light, glow, baseY, on: true, pop: 0 });
+      // pickup shockwave: always in the scene (invisible at rest) so its shader is compiled up front
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(0.85, 1, 24).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      ring.position.set(h.pos.x, h.pos.y + 0.12, h.pos.z);
+      ring.scale.setScalar(0.01);
+      s.add(ring);
+      this.pickups.push({ core, light, lightI, glow, ring, ringT: 0, baseY, on: true, pop: 0 });
     }
 
     // ------------------------------------------------------------ sky dome
@@ -278,14 +287,28 @@ export class World {
       if (on && !p.on) p.pop = 1; // respawned: grow back in
       p.on = on;
       p.core.visible = p.glow.visible = on;
-      p.light.visible = on;
+      // never toggle a light's visibility: changing the active light count recompiles every
+      // shader in the scene (a visible freeze). Dim it instead.
+      p.light.intensity = on ? p.lightI : 0;
     });
+  }
+
+  /** A pickup was taken: a red shockwave rolls out across the floor from it. */
+  pickupBurst(i: number): void {
+    const p = this.pickups[i];
+    if (p) p.ringT = 0.55;
   }
 
   update(dt: number, time: number): void {
     psxUniforms.uTime.value = time;
     for (let i = 0; i < this.pickups.length; i++) {
       const p = this.pickups[i];
+      if (p.ringT > 0) {
+        p.ringT = Math.max(0, p.ringT - dt);
+        const k = 1 - p.ringT / 0.55; // 0 -> 1
+        p.ring.scale.setScalar(0.3 + k * 4.2);
+        (p.ring.material as THREE.MeshBasicMaterial).opacity = (1 - k) * 0.9;
+      }
       if (!p.on) continue;
       p.pop = Math.max(0, p.pop - dt * 3);
       p.core.rotation.y = time * 1.8 + i;

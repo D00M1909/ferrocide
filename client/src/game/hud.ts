@@ -41,6 +41,7 @@ export class HUD {
   private partnerFill = el('i');
   private dmgArcs: HTMLElement[] = [];
   private net = el('div', 'net');
+  private fps = el('div', 'fps-counter');
   private killfeed = el('div', 'killfeed');
   private splat = el('div', 'lens-blood');
   private ghostHp = 100;
@@ -118,7 +119,7 @@ export class HUD {
       dd.appendChild(a);
       this.dmgArcs.push(a);
     }
-    this.root.append(dd, this.net, this.killfeed);
+    this.root.append(dd, this.net, this.fps, this.killfeed);
   }
 
   show(v: boolean): void {
@@ -192,10 +193,9 @@ export class HUD {
     this.splatT = Math.max(0, this.splatT - dt);
     this.splat.style.opacity = String(Math.min(0.85, this.splatT * 0.7));
     for (const a of this.dmgArcs) a.style.opacity = String(Math.max(0, Number(a.style.opacity || 0) - dt * 1.5));
-    const parts: string[] = [];
-    if (s.fps !== null) parts.push(`${Math.round(s.fps)} FPS`);
-    if (s.online) parts.push(`${Math.round(s.ping)} MS`);
-    this.net.textContent = parts.join(' · ');
+    this.net.textContent = s.online ? `${Math.round(s.ping)} ms` : '';
+    this.fps.style.display = s.fps === null ? 'none' : 'block';
+    if (s.fps !== null) this.fps.textContent = `${Math.round(s.fps)} FPS`;
   }
 
   /** Only add/remove changed rows so the CSS entrance animation plays once per entry. */
