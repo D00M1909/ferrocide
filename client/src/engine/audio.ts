@@ -33,7 +33,6 @@ const SFX_FILES: Record<string, string[]> = {
   forcefield: ['forcefield.ogg'],
   spawn: ['spawn.ogg'],
   thruster: ['thruster.ogg'],
-  blip: ['ui_blip.ogg'],
   door: ['door.ogg'],
   clank: ['clank.ogg'],
   // creature vocals (Pixabay) — pitched per enemy, clipped to short barks

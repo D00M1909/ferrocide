@@ -320,8 +320,7 @@ export class Game {
           break;
         case 'wave': {
           this.hud.showBanner(e.boss ? 'WARNING' : `WAVE ${e.n}`, e.title, 2.6);
-          this.audio.play('door', { volume: 0.8, pitch: 0.6 });
-          this.audio.synth('charge', 0.6);
+          this.audio.play('door', { volume: 0.35, pitch: 0.6, dur: 0.6 });
           if (e.boss) void this.audio.playMusic('boss');
           else if (e.n === 1 || e.n === 5) void this.audio.playMusic(e.n >= 5 ? 'combat2' : 'combat1');
           break;

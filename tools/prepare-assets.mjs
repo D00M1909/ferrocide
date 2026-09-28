@@ -45,7 +45,7 @@ for (const [src, dst] of [
   ['explosionCrunch_000', 'explosion_crunch_0'], ['explosionCrunch_002', 'explosion_crunch_1'],
   ['lowFrequency_explosion_000', 'explosion_low'], ['laserLarge_001', 'laser_large'], ['laserSmall_002', 'laser_small'],
   ['laserRetro_003', 'laser_retro'], ['forceField_001', 'forcefield'], ['forceField_003', 'spawn'], ['thrusterFire_002', 'thruster'],
-  ['computerNoise_001', 'ui_blip'], ['doorOpen_001', 'door'], ['impactMetal_002', 'clank'],
+  ['doorOpen_001', 'door'], ['impactMetal_002', 'clank'],
 ]) copy(`${kScifi}/${src}.ogg`, `sfx/${dst}.ogg`);
 
 // Sound effects (Pixabay, royalty free)

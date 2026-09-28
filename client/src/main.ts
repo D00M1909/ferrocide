@@ -42,7 +42,7 @@ function show(el: HTMLElement | null): void {
 
 function blip(): void {
   audio.resume();
-  audio.play('blip', { volume: 0.4 });
+  audio.synth('tick', 0.35); // a short, quiet click (the old sample was a multi-second drone)
 }
 
 function esc(s: string): string {
