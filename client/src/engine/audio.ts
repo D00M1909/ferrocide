@@ -44,6 +44,28 @@ const SFX_FILES: Record<string, string[]> = {
   ricochet: ['ricochet.mp3'],
 };
 
+// Every file is levelled on load so its loudest 50 ms sits here at volume 1; the source
+// files span ~30 dB (explosions near 0 dB RMS, coins at -31), so without this the call-site
+// volumes meant nothing. Boosts are capped so thin sounds don't drag noise up with them.
+const SAMPLE_TARGET_DB = -14;
+const MAX_BOOST_DB = 6;
+const PEAK_CEIL_DB = -4; // a boost never pushes a sample's own peak past this
+// Many source files are long takes (4-9 s); the game only wants the attack and a short tail.
+const MAX_DUR: Record<string, number> = {
+  revolver: 0.9, revolver_alt: 0.9, shotgun: 1.1, pump: 0.7, rocket: 1.0,
+  explosion: 1.8, explosion_small: 1.0, explosion_low: 1.4, coin: 0.8, parry: 0.9,
+  whoosh: 0.5, gore: 1.0, flesh: 0.6, armor: 0.6, glass: 1.2, laser_large: 0.7,
+  forcefield: 0.7, spawn: 0.8, thruster: 0.9, growl: 0.8, scream: 0.5, roar: 1.6,
+  edeath: 0.7, ping: 0.5, ricochet: 0.6,
+};
+// Overlapping copies of one sound: the oldest fades out when a new one would exceed this.
+const MAX_VOICES = 3;
+// Synth layers are raw oscillators at up to full scale; this seats them under the samples.
+const SYNTH_TRIM = 0.18;
+
+// Sliders are perceptual: gain = slider², so 50% is about -12 dB and 5% about -26 dB.
+const taper = (v: number) => Math.max(0, Math.min(1, v)) ** 2;
+
 export type MusicId = TrackId;
 
 export interface PlayOpts {
@@ -64,40 +86,45 @@ export class Audio {
   master: GainNode;
   sfxBus: GainNode;
   musicBus: GainNode;
+  private synthBus: GainNode;
   private reverbSend: GainNode;
   private musicFilter: BiquadFilterNode;
-  private buffers = new Map<string, AudioBuffer[]>();
+  private buffers = new Map<string, { buf: AudioBuffer; gain: number }[]>();
   private music: MusicEngine;
   private listener = { pos: { x: 0, y: 0, z: 0 }, yaw: 0 };
   private recent = new Map<string, number>();
+  private voices = new Map<string, { src: AudioBufferSourceNode; fade: GainNode }[]>();
   private noiseBuf: AudioBuffer;
   private musicVolume = 1;
 
   constructor() {
     this.ctx = new AudioContext();
-    // master chain: bus -> glue compressor -> brickwall-ish limiter -> out
-    this.master = this.ctx.createGain();
-    const glue = this.ctx.createDynamicsCompressor();
-    glue.threshold.value = -14;
-    glue.ratio.value = 4;
-    glue.attack.value = 0.005;
-    glue.release.value = 0.2;
+    // mix -> safety limiter -> master volume -> out. The master slider sits AFTER the
+    // limiter so turning it down is a clean attenuation; the limiter's automatic makeup
+    // gain (Web Audio always applies some) is cancelled by the trim in front of it.
+    const mix = this.ctx.createGain();
+    mix.gain.value = 0.9;
     const limiter = this.ctx.createDynamicsCompressor();
-    limiter.threshold.value = -2;
+    limiter.threshold.value = -3;
     limiter.knee.value = 0;
     limiter.ratio.value = 20;
-    limiter.attack.value = 0.001;
-    limiter.release.value = 0.08;
-    this.master.connect(glue).connect(limiter).connect(this.ctx.destination);
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.1;
+    this.master = this.ctx.createGain();
+    mix.connect(limiter).connect(this.master).connect(this.ctx.destination);
 
     this.sfxBus = this.ctx.createGain();
-    this.sfxBus.connect(this.master);
-    // shared reverb: a short industrial room built from decaying noise
+    this.sfxBus.connect(mix);
+    this.synthBus = this.ctx.createGain();
+    this.synthBus.gain.value = SYNTH_TRIM;
+    this.synthBus.connect(this.sfxBus);
+    // shared reverb: a short industrial room built from decaying noise. It returns into
+    // the SFX bus so the effects slider turns the tails down with the sounds.
     const conv = this.ctx.createConvolver();
     conv.buffer = this.makeImpulse(1.6, 2.6);
     this.reverbSend = this.ctx.createGain();
-    this.reverbSend.gain.value = 0.35;
-    this.reverbSend.connect(conv).connect(this.master);
+    this.reverbSend.gain.value = 0.25;
+    this.reverbSend.connect(conv).connect(this.sfxBus);
 
     this.musicBus = this.ctx.createGain();
     this.musicFilter = this.ctx.createBiquadFilter();
@@ -105,11 +132,11 @@ export class Audio {
     this.musicFilter.frequency.value = 20000;
     this.musicFilter.Q.value = 0.5;
     this.musicFilter.connect(this.musicBus);
-    this.musicBus.connect(this.master);
+    this.musicBus.connect(mix);
     // original soundtrack, composed + synthesised live (see music.ts); the engine's own
     // output level is modest so it sits under the gunfire instead of on top of it
     const musicOut = this.ctx.createGain();
-    musicOut.gain.value = 0.55;
+    musicOut.gain.value = 1.1;
     musicOut.connect(this.musicFilter);
     const musicVerb = this.ctx.createConvolver();
     musicVerb.buffer = this.makeImpulse(2.8, 3.2); // a bigger, darker hall for the score
@@ -137,10 +164,10 @@ export class Audio {
   }
 
   setVolumes(master: number, music: number, sfx: number): void {
-    this.master.gain.value = master;
-    this.musicVolume = music;
-    this.musicBus.gain.value = music;
-    this.sfxBus.gain.value = sfx;
+    this.master.gain.value = taper(master);
+    this.musicVolume = taper(music);
+    this.musicBus.gain.value = this.musicVolume;
+    this.sfxBus.gain.value = taper(sfx);
   }
 
   async loadAll(onProgress?: (f: number) => void): Promise<void> {
@@ -149,12 +176,12 @@ export class Audio {
     const entries = Object.entries(SFX_FILES);
     const total = entries.reduce((n, [, f]) => n + f.length, 0);
     for (const [name, files] of entries) {
-      const list: AudioBuffer[] = [];
+      const list: { buf: AudioBuffer; gain: number }[] = [];
       this.buffers.set(name, list);
       for (const f of files) {
         jobs.push(
           this.fetchBuffer(`/assets/sfx/${f}`)
-            .then((b) => { if (b) list.push(b); })
+            .then((b) => { if (b) list.push({ buf: b, gain: levelGain(b, MAX_DUR[name]) }); })
             .finally(() => onProgress?.(++done / total)),
         );
       }
@@ -188,12 +215,13 @@ export class Audio {
     const last = this.recent.get(name) ?? -1;
     if (now - last < 0.025) return;
     this.recent.set(name, now);
+    const pick = list[Math.floor(Math.random() * list.length)];
     const src = this.ctx.createBufferSource();
-    src.buffer = list[Math.floor(Math.random() * list.length)];
+    src.buffer = pick.buf;
     const variance = o.variance ?? 0.08;
     src.playbackRate.value = (o.pitch ?? 1) * (1 + (Math.random() * 2 - 1) * variance);
     const g = this.ctx.createGain();
-    let vol = o.volume ?? 1;
+    let vol = (o.volume ?? 1) * pick.gain;
     let out: AudioNode = g;
     let rev = o.reverb ?? 0.25;
     if (o.at) {
@@ -219,10 +247,23 @@ export class Audio {
       fade.connect(send).connect(this.reverbSend);
     }
     src.start(now, o.offset ?? 0);
-    if (o.dur) {
-      fade.gain.setValueAtTime(1, now + o.dur * 0.7);
-      fade.gain.linearRampToValueAtTime(0, now + o.dur);
-      src.stop(now + o.dur + 0.02);
+    const dur = o.dur ?? MAX_DUR[name];
+    if (dur) {
+      fade.gain.setValueAtTime(1, now + dur * 0.6);
+      fade.gain.linearRampToValueAtTime(0, now + dur);
+      src.stop(now + dur + 0.02);
+    }
+    // voice cap: fade the oldest copy of this sound instead of stacking a wall of them
+    const live = this.voices.get(name) ?? [];
+    this.voices.set(name, live);
+    live.push({ src, fade });
+    src.onended = () => { const i = live.findIndex((v) => v.src === src); if (i >= 0) live.splice(i, 1); };
+    if (live.length > MAX_VOICES) {
+      const old = live.shift()!;
+      old.fade.gain.cancelScheduledValues(now);
+      old.fade.gain.setValueAtTime(old.fade.gain.value, now);
+      old.fade.gain.linearRampToValueAtTime(0, now + 0.06);
+      old.src.stop(now + 0.08);
     }
   }
 
@@ -230,8 +271,8 @@ export class Audio {
   synth(kind: SynthKind, vol = 1): void {
     const t = this.ctx.currentTime;
     const g = this.ctx.createGain();
-    g.connect(this.sfxBus);
-    const osc = (type: OscillatorType, f0: number, f1: number, dur: number, v: number, delay = 0) => {
+    g.connect(this.synthBus);
+    const osc =(type: OscillatorType, f0: number, f1: number, dur: number, v: number, delay = 0) => {
       const o = this.ctx.createOscillator();
       const og = this.ctx.createGain();
       o.type = type;
@@ -307,7 +348,7 @@ export class Audio {
     pan.pan.value = dist > 0.5 ? Math.max(-0.9, Math.min(0.9, (dx * rx + dz * rz) / dist)) : 0;
     o.connect(f1).connect(g);
     o.connect(f2).connect(g);
-    g.connect(pan).connect(this.sfxBus);
+    g.connect(pan).connect(this.synthBus);
     const send = this.ctx.createGain();
     send.gain.value = 0.4;
     g.connect(send).connect(this.reverbSend);
@@ -340,4 +381,22 @@ export class Audio {
     this.musicBus.gain.setValueAtTime(this.musicVolume * amount, t);
     this.musicBus.gain.linearRampToValueAtTime(this.musicVolume, t + time);
   }
+}
+
+/** Gain that brings the loudest 50 ms of the part the game actually plays to SAMPLE_TARGET_DB. */
+function levelGain(b: AudioBuffer, maxDur?: number): number {
+  const win = Math.floor(b.sampleRate * 0.05);
+  const end = Math.min(b.length, maxDur ? Math.floor(b.sampleRate * maxDur) : b.length);
+  const chans = [...Array(b.numberOfChannels)].map((_, c) => b.getChannelData(c));
+  let loudest = 0, peak = 0;
+  for (let s = 0; s + win <= end; s += win >> 1) {
+    let sum = 0;
+    for (const d of chans) for (let i = s; i < s + win; i++) { sum += d[i] * d[i]; peak = Math.max(peak, Math.abs(d[i])); }
+    loudest = Math.max(loudest, sum / (win * chans.length));
+  }
+  if (loudest <= 0) return 1;
+  let db = SAMPLE_TARGET_DB - 10 * Math.log10(loudest);
+  // only boosts are limited; sharp transients that already reach the target are left alone
+  if (db > 0) db = Math.min(db, MAX_BOOST_DB, Math.max(0, PEAK_CEIL_DB - 20 * Math.log10(peak)));
+  return Math.pow(10, db / 20);
 }
