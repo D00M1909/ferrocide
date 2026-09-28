@@ -102,11 +102,12 @@ export function serverHttp(): string {
  * Free hosting puts an idle game server to sleep; waking it takes up to a minute. Pings /health
  * until it answers, reporting progress so the menu can say what's happening instead of failing.
  */
-export async function wakeServer(onWaiting: (seconds: number) => void, timeout = 100): Promise<boolean> {
+export async function wakeServer(onWaiting: (seconds: number) => void, timeout = 150, cancelled: () => boolean = () => false): Promise<boolean> {
   const t0 = performance.now();
   for (;;) {
+    if (cancelled()) return false;
     const ctl = new AbortController();
-    const abort = setTimeout(() => ctl.abort(), 4000);
+    const abort = setTimeout(() => ctl.abort(), 10000);
     try {
       const r = await fetch(`${serverHttp()}/health`, { signal: ctl.signal, cache: 'no-store' });
       if (r.ok) return true;

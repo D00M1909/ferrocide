@@ -268,20 +268,28 @@ async function startOnline(mode: 'host' | 'join', code = ''): Promise<void> {
   show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
   let res: { link: ColyseusLink; welcome: WelcomeMsg };
   let wake: HTMLElement | null = null;
+  let cancelled = false;
   const awake = await wakeServer((s) => {
+    if (cancelled) return;
     if (!wake) {
       wake = h(`
         <div class="loading">WAKING THE CO-OP SERVER</div>
         <div class="wake-bar"><i></i></div>
         <div class="wake-time"></div>
-        <div class="hint">The server sleeps when nobody is playing, so the first match takes up to a minute to start.<br>Solo is always instant.</div>`);
+        <div class="hint">The free server sleeps when nobody is playing. Waking it usually takes under a minute, sometimes two. Solo is always instant.</div>
+        <div class="row"><button id="wake-cancel">CANCEL</button><button id="wake-solo" class="primary">PLAY SOLO INSTEAD</button></div>`);
+      wake.querySelector('#wake-cancel')!.addEventListener('click', () => { blip(); cancelled = true; mainMenu(); });
+      wake.querySelector('#wake-solo')!.addEventListener('click', () => { blip(); cancelled = true; startSolo(); });
       show(wake);
     }
-    (wake.querySelector('.wake-bar i') as HTMLElement).style.width = `${Math.min(100, (s / 60) * 100)}%`;
-    wake.querySelector('.wake-time')!.textContent = `0:${String(s).padStart(2, '0')}`;
-  });
+    // the bar fills over ~90 s, then crawls, so it never sits "full" while we're still waiting
+    const f = s < 90 ? s / 90 : 1 - 0.1 * Math.exp(-(s - 90) / 30);
+    (wake.querySelector('.wake-bar i') as HTMLElement).style.width = `${Math.min(99, f * 100)}%`;
+    wake.querySelector('.wake-time')!.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }, 150, () => cancelled);
+  if (cancelled) return;
   if (wake) show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
-  if (!awake) { mainMenu('The co-op server did not wake up. Try again in a minute (solo always works).'); return; }
+  if (!awake) { mainMenu('The co-op server did not wake up in time. Try again in a minute; solo always works.'); return; }
   try {
     res = await ColyseusLink.connect(mode, settings.name || 'SLAYER', code);
   } catch (e) {

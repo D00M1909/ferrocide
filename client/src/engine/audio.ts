@@ -79,7 +79,7 @@ export interface PlayOpts {
   offset?: number; // start this far into the sample
 }
 
-type SynthKind = 'tick' | 'kill' | 'rankup' | 'jump' | 'land' | 'heal' | 'dash' | 'denied' | 'charge' | 'beep' | 'thump' | 'boom';
+type SynthKind = 'tick' | 'kill' | 'rankup' | 'jump' | 'land' | 'heal' | 'pickup' | 'dash' | 'denied' | 'charge' | 'beep' | 'thump' | 'boom';
 
 export class Audio {
   ctx: AudioContext;
@@ -305,6 +305,8 @@ export class Audio {
       case 'jump': noise(0.08, 0.18, 1400, 2); break;
       case 'land': osc('sine', 140, 50, 0.12, 0.45); noise(0.07, 0.2, 500, 1); break;
       case 'heal': osc('sine', 500, 900, 0.1, 0.1); break;
+      // two rising notes (a fifth apart) with a low body: reads as "restored" without being shrill
+      case 'pickup': osc('sine', 392, 392, 0.22, 0.22); osc('sine', 587, 587, 0.3, 0.2, 0.07); osc('triangle', 130, 98, 0.25, 0.3); break;
       case 'dash': noise(0.18, 0.35, 900, 0.8); break;
       case 'denied': osc('square', 180, 120, 0.1, 0.12); break;
       case 'charge': osc('sawtooth', 200, 1200, 0.5, 0.1); break;

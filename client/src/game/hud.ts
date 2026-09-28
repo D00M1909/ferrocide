@@ -16,6 +16,7 @@ export class HUD {
   private hpFill = el('i', 'hp-fill');
   private hpHard = el('i', 'hp-hard');
   private hpGhost = el('i', 'hp-ghost');
+  private hpBar: HTMLElement | null = null;
   private stam: HTMLElement[] = [];
   private weapon = el('div', 'wname');
   private slots: HTMLElement[] = [];
@@ -61,6 +62,7 @@ export class HUD {
     const bl = el('div', 'hud-bl');
     const hpRow = el('div', 'hp-row');
     const hpBar = el('div', 'bar hp');
+    this.hpBar = hpBar;
     hpBar.append(this.hpGhost, this.hpFill, this.hpHard);
     hpRow.append(this.hpNum, hpBar);
     const stam = el('div', 'stamina');
@@ -205,6 +207,20 @@ export class HUD {
       const d = el('div', f.big ? 'big' : '', `+ ${f.label}`);
       this.feed.prepend(d);
       this.feedIds.set(f.id, d);
+    }
+  }
+
+  /** Health pickup: a "+N" that floats up off the health number, and the bar glows. */
+  healPop(amount: number, big: boolean): void {
+    const pop = el('div', big ? 'heal-pop big' : 'heal-pop');
+    pop.textContent = `+${Math.round(amount)}`;
+    this.hpNum.parentElement?.appendChild(pop);
+    setTimeout(() => pop.remove(), 1100);
+    for (const e of [this.hpBar, this.hpNum]) {
+      if (!e) continue;
+      e.classList.remove('healed');
+      void e.offsetWidth; // restart the animation
+      e.classList.add('healed');
     }
   }
 

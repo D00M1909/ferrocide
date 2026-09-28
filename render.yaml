@@ -10,6 +10,14 @@ services:
     startCommand: npx tsx server/index.ts
     healthCheckPath: /health
     autoDeploy: true
+    # only server-side changes redeploy (a redeploy restarts the server and drops co-op rooms)
+    buildFilter:
+      paths:
+        - server/**
+        - shared/**
+        - package.json
+        - package-lock.json
+        - render.yaml
     envVars:
       - key: NODE_VERSION
         value: "22"

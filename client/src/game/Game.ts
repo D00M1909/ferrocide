@@ -71,6 +71,9 @@ export class Game {
   private deadT = 0;
   private hurtFlash = 0;
   private flashAmt = 0;
+  private pickupT = -1; // last time we grabbed a health pickup
+  private pickupBig = false;
+  private pickupMask = -1; // last known pickup availability (for respawn cues)
   private flashColor = new THREE.Color();
   private viewLag = 0; // co-op: hitstop freezes the rendered world, then it catches up
   private simClock = 0; // solo: world time (stops during hitstop, so the sim truly freezes)
@@ -215,7 +218,20 @@ export class Game {
     const now = performance.now() / 1000;
     this.snaps.push(s, this.netNow());
     this.hazards.applySnapshot(s, now);
-    this.world.setPickups(s.pk ?? -1);
+    const pk = s.pk ?? -1;
+    if (this.pickupMask !== -1 && pk !== this.pickupMask) {
+      // a crystal grew back: a small flare, and a soft chime if it's near enough to matter
+      for (let i = 0; i < HEALTH_PICKUPS.length; i++) {
+        if (!(pk & (1 << i)) || this.pickupMask & (1 << i)) continue;
+        const h = HEALTH_PICKUPS[i];
+        const at = { x: h.pos.x, y: h.pos.y + 1, z: h.pos.z };
+        this.fx.magic(at, 10, COLORS.red, 1.5, 0.3);
+        this.fx.glow(at, 2, COLORS.red, 0.25);
+        if (Math.hypot(at.x - this.motor.pos.x, at.z - this.motor.pos.z) < 22) this.audio.play('ping', { at, volume: 0.2, pitch: 0.8, dur: 0.4 });
+      }
+    }
+    this.pickupMask = pk;
+    this.world.setPickups(pk);
     if (s.phase !== this.phase) {
       this.phase = s.phase;
       this.onPhase?.(s.phase);
@@ -304,7 +320,9 @@ export class Game {
           if (e.pid === me) {
             this.hp = e.hp;
             this.hard = e.hard;
-            if (e.amt >= 8) this.audio.synth('heal', 0.5);
+            // the pickup event arrives just before its heal: show what was actually restored
+            if (this.time - this.pickupT < 0.2) { if (e.amt >= 1) this.hud.healPop(e.amt, this.pickupBig); }
+            else if (e.amt >= 8) this.audio.synth('heal', 0.5);
           }
           break;
         case 'pdie':
@@ -318,10 +336,23 @@ export class Game {
           const h = HEALTH_PICKUPS[e.i];
           if (!h) break;
           const at = { x: h.pos.x, y: h.pos.y + 1, z: h.pos.z };
-          this.fx.sparks(at, h.large ? 24 : 14, 5, COLORS.bloodBright, 0.1);
-          this.fx.glow(at, h.large ? 3 : 2, COLORS.red, 0.2);
-          this.audio.play('forcefield', { at, volume: 0.35, pitch: h.large ? 1.1 : 1.5, dur: 0.4 });
-          if (e.pid === me) this.audio.synth('heal', h.large ? 1 : 0.7);
+          this.fx.flashLight(at, 0xff2a2a, h.large ? 5 : 3.5, h.large ? 9 : 6, 0.3);
+          this.audio.play('forcefield', { at, volume: 0.25, pitch: h.large ? 1.1 : 1.5, dur: 0.35 });
+          if (e.pid !== me) {
+            // seen from outside: the crystal shatters, shards burst out and embers rise
+            this.fx.sparks(at, h.large ? 36 : 22, h.large ? 7 : 5, COLORS.bloodBright, 0.12);
+            this.fx.magic(at, h.large ? 26 : 16, COLORS.red, 2.5, 0.35);
+            this.fx.glow(at, h.large ? 4 : 2.6, COLORS.red, 0.3);
+          } else {
+            // the picker is standing inside it: keep the burst low and let the screen + HUD speak
+            const feet = { x: this.motor.pos.x, y: this.motor.pos.y + 0.15, z: this.motor.pos.z };
+            this.fx.sparks(feet, h.large ? 18 : 12, 4, COLORS.bloodBright, 0.08);
+            this.audio.synth('pickup', h.large ? 0.9 : 0.7);
+            this.pickupBig = h.large;
+            this.flashAmt = Math.max(this.flashAmt, h.large ? 0.14 : 0.1);
+            this.flashColor.set(0xff3a3a);
+            this.pickupT = this.time;
+          }
           break;
         }
         case 'revive':
