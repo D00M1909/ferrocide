@@ -68,6 +68,7 @@ async function boot(): Promise<void> {
     audio.loadAll((f) => { b = f; upd(); }),
   ]);
   game = new Game(canvas, ui, audio, input, settings);
+  game.warmup(); // compile every shader behind the loading screen, not mid-fight
   (window as unknown as { __game: Game }).__game = game;
   game.onGameOver = (info) => showResults(info);
   game.onPause = (p) => (p ? showPause() : hidePause());

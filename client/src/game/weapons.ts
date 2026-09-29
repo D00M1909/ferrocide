@@ -1295,6 +1295,28 @@ export class Weapons {
     this.chargeT = -1;
   }
 
+  /** Loading-screen warm-up: show every viewmodel and projectile mesh once (pass null to undo). */
+  warm(at: THREE.Vector3 | null): void {
+    if (!at) {
+      this.clear();
+      this.arm.visible = false;
+      this.muzzleFlash.visible = false;
+      this.select(this.current, true);
+      return;
+    }
+    for (const k of WEAPON_ORDER) {
+      this.models[k].visible = true;
+      this.models[k].position.copy(VIEW[k].offset);
+    }
+    this.arm.visible = true;
+    this.muzzleFlash.visible = true;
+    const z = { x: 0, y: 0, z: 0 };
+    this.spawnCoin(-1, at, z, false, 'warm');
+    this.spawnCore(-1, { x: at.x + 1, y: at.y, z: at.z }, z, false, 'warm');
+    this.spawnRocket(-1, { x: at.x - 1, y: at.y, z: at.z }, { x: 0, y: 0, z: -1 }, false, 'warm');
+    this.spawnBomblets(at);
+  }
+
   /** One-line alt-fire status for the HUD. */
   altLabel(): string {
     const v = this.variant();

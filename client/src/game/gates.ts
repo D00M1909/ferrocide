@@ -92,6 +92,11 @@ export class Gates {
     });
   }
 
+  /** Loading-screen warm-up: stand the gates up for one frame so their shaders compile. */
+  warm(on: boolean): void {
+    for (const v of this.views) v.root.position.y = on ? 0 : PARK_Y;
+  }
+
   get anyActive(): boolean {
     return this.views.some((v) => v.active);
   }

@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { raycastWorld } from '../../../shared/arena';
 import { PROJECTILES, type ProjectileKind } from '../../../shared/constants';
 import { pointSegmentDist, type Vec3 } from '../../../shared/math';
-import { PROJ_KINDS, type GameEvent, type HurtMsg, type Snapshot } from '../../../shared/protocol';
+import { PROJ_KINDS, type GameEvent, type HurtMsg, type Snapshot, type V } from '../../../shared/protocol';
 import { sprite } from '../engine/assets';
 import type { Audio } from '../engine/audio';
 import { COLORS, type FX } from './fx';
@@ -306,6 +306,26 @@ export class Hazards {
     let best = Infinity;
     for (const v of this.projectiles.values()) if (v.kind !== 'reflected') best = Math.min(best, dist(v.pos, p));
     return best;
+  }
+
+  /** Loading-screen warm-up: one of every hazard visual, silently, so the GPU compiles them now. */
+  warm(p: Vec3): void {
+    const audio = this.audio;
+    const shake = this.fx.shake;
+    this.audio = { play: () => undefined } as unknown as Audio;
+    this.fx.shake = () => undefined;
+    const probe: PlayerProbe = { centre: { x: 0, y: -100, z: 0 }, feetY: -100, grounded: true, invulnerable: true, alive: false };
+    const at: V = [p.x, p.y, p.z];
+    try {
+      const pr = PROJ_KINDS.map((_k, i) => [-(i + 1), i, p.x + i, p.y, p.z, 0, 4, 0, 0]);
+      this.applySnapshot({ t: 0, e: [], pr, pl: [], wave: 0, phase: 'lobby', left: 0, timer: 0, pk: 0 } as unknown as Snapshot, 0);
+      this.onEvent({ t: 'shock', id: 0, aid: -1, p: at, speed: 1, range: 4, d: 0 }, probe);
+      this.onEvent({ t: 'beam', id: 0, aid: -2, p: at, yaw0: 0, sweep: 0, pitch: 0, dur: 1, dps: 0 }, probe);
+      this.onEvent({ t: 'boom', p: at, r: 3, d: 0, hostile: false, aid: 0, k: 'core' }, probe);
+    } finally {
+      this.audio = audio;
+      this.fx.shake = shake;
+    }
   }
 
   clear(): void {

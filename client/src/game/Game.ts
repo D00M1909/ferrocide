@@ -140,6 +140,51 @@ export class Game {
     this.resize();
   }
 
+  /**
+   * Loading screen: draw one of everything once (every enemy kind, hazard, effect, viewmodel,
+   * projectile, the partner model and the run gates) so shaders compile and GPU buffers upload
+   * now. Otherwise the first appearance of each enemy type froze the game for 20-150 ms.
+   */
+  warmup(): void {
+    const at = { x: 0, y: 1.2, z: 0 };
+    this.enemies.warm(at);
+    this.hazards.warm({ x: 0, y: 4, z: 3 });
+    this.weapons.warm(new THREE.Vector3(1.5, 3, 3));
+    this.gates.warm(true);
+    const partner = new RemotePlayer('warm', 'WARM', this.world.scene, sprite('light_01'));
+    partner.inst.root.position.set(-3, 1.2, 4);
+    const p = { x: 2, y: 2.5, z: 3 };
+    this.fx.gibBurst(p, 6, 4, 0.2, 'flesh');
+    this.fx.gibBurst(p, 6, 4, 0.2, 'metal');
+    this.fx.explosion(p, 2);
+    this.fx.blood(p, 8);
+    this.fx.bloodMist(p, 2);
+    this.fx.splatter(p, 2, 2);
+    this.fx.sparks(p, 6);
+    this.fx.smoke(p, 3);
+    this.fx.dust(p, 3);
+    this.fx.magic(p, 3, COLORS.hostile);
+    this.fx.fireTrail(p);
+    this.fx.glow(p, 1, COLORS.blue);
+    this.fx.decal({ x: 1, y: 1.21, z: 1 }, { x: 0, y: 1, z: 0 }, 1, 'blood');
+    this.fx.decal({ x: -1, y: 1.21, z: 1 }, { x: 0, y: 1, z: 0 }, 1, 'scorch');
+    this.fx.tracer({ x: -3, y: 3, z: 3 }, { x: 3, y: 3, z: 3 });
+    this.fx.update(1 / 60);
+    this.camera.position.set(0, 24, 30);
+    this.camera.lookAt(0, 2, 0);
+    this.camera.updateMatrixWorld();
+    for (let i = 0; i < 2; i++) this.renderer.render(this.world.scene, this.camera, this.weapons.vmScene, this.weapons.vmCam);
+    partner.dispose();
+    this.enemies.clear();
+    this.hazards.clear();
+    this.weapons.warm(null);
+    this.gates.warm(false);
+    this.fx.clear();
+    this.fx.update(1 / 60);
+    // spare enemy models for the first waves (a later spawn reuses one that died)
+    this.enemies.prefill({ husk: 10, eye: 6, drone: 4, warden: 4, stalker: 4, brute: 2, colossus: 1 });
+  }
+
   get selfId(): string {
     return this.link?.id ?? '';
   }

@@ -118,6 +118,9 @@ export class EnemyView {
   horns = new THREE.Group();
   readonly skin: Skin;
   readonly def;
+  // pooling: what a reused view is reset back to
+  private baseEmissive: (THREE.Color | null)[] = [];
+  private baseInner = new THREE.Vector3();
 
   constructor(public id: number, public kind: EnemyKind, scene: THREE.Scene, glowTex: THREE.Texture) {
     this.def = ENEMIES[kind];
@@ -164,6 +167,53 @@ export class EnemyView {
     this.glow.scale.setScalar(this.def.heavy ? 3 : 1.6);
     this.inst.root.add(this.glow);
     this.glow.position.y = this.def.flying ? 0 : this.def.headY;
+    this.baseEmissive = this.inst.materials.map((m) => (m as THREE.MeshLambertMaterial).emissive?.clone() ?? null);
+    this.baseInner.copy(this.inst.inner.scale);
+    this.play('spawn');
+  }
+
+  /** Leave the scene but stay intact for reuse: cloning a model costs up to 10 ms per spawn. */
+  park(scene: THREE.Scene): void {
+    scene.remove(this.inst.root, this.eyes, this.horns);
+    this.inst.mixer?.stopAllAction();
+    this.anim = null;
+  }
+
+  /** Come back as a brand-new enemy: every trace of the previous life (death tint, elite aura) is reset. */
+  reuse(id: number, scene: THREE.Scene): void {
+    this.id = id;
+    this.vel.set(0, 0, 0);
+    this.yaw = 0;
+    this.state = 'spawn';
+    this.hp = this.def.hp;
+    this.maxHp = 0;
+    this.predicted = 0;
+    this.dead = false;
+    this.deadT = 0;
+    this.gibbed = false;
+    this.flashT = 0;
+    this.telegraphT = 0;
+    this.meleeTelegraph = false;
+    this.blinkFx = 0;
+    this.lockAnim = 0;
+    this.spawnT = 0;
+    this.headValid = false;
+    if (this.aura) {
+      this.inst.root.remove(this.aura);
+      (this.aura.material as THREE.Material).dispose();
+      this.aura = null;
+    }
+    this.elite = 0;
+    this.inst.inner.scale.copy(this.baseInner);
+    this.inst.materials.forEach((m, i) => { const e = this.baseEmissive[i]; if (e) (m as THREE.MeshLambertMaterial).emissive.copy(e); });
+    this.inst.root.visible = this.eyes.visible = this.horns.visible = true;
+    this.inst.root.scale.setScalar(1);
+    (this.glow.material as THREE.SpriteMaterial).opacity = 0;
+    this.inst.flash.value = 0;
+    const tags = this as unknown as { lastHead?: boolean; lastWeapon?: string };
+    delete tags.lastHead;
+    delete tags.lastWeapon;
+    scene.add(this.inst.root, this.eyes, this.horns);
     this.play('spawn');
   }
 
@@ -206,13 +256,6 @@ export class EnemyView {
     return this.hp - this.predicted;
   }
 
-  dispose(scene: THREE.Scene): void {
-    scene.remove(this.inst.root);
-    scene.remove(this.eyes);
-    scene.remove(this.horns);
-    (this.eyes.material as THREE.Material).dispose();
-    this.inst.mixer?.stopAllAction();
-  }
 }
 
 export interface EnemyHit {
@@ -232,10 +275,36 @@ export class Enemies {
     this.glowTex = glowTex;
   }
 
+  /** Parked views ready for reuse, per kind. */
+  private pool = new Map<EnemyKind, EnemyView[]>();
+
+  private release(v: EnemyView): void {
+    v.park(this.scene);
+    this.views.delete(v.id);
+    const list = this.pool.get(v.kind) ?? [];
+    list.push(v);
+    this.pool.set(v.kind, list);
+  }
+
+  /** Build spare views up front (loading screen) so early spawns don't clone models mid-fight. */
+  prefill(counts: Partial<Record<EnemyKind, number>>): void {
+    for (const [kind, n] of Object.entries(counts) as [EnemyKind, number][]) {
+      const list = this.pool.get(kind) ?? [];
+      while (list.length < n) {
+        const v = new EnemyView(-1, kind, this.scene, this.glowTex);
+        v.park(this.scene);
+        list.push(v);
+      }
+      this.pool.set(kind, list);
+    }
+  }
+
   private ensure(id: number, kind: EnemyKind, p: Vec3): EnemyView {
     let v = this.views.get(id);
     if (!v) {
-      v = new EnemyView(id, kind, this.scene, this.glowTex);
+      const spare = this.pool.get(kind)?.pop();
+      if (spare) spare.reuse(id, this.scene);
+      v = spare ?? new EnemyView(id, kind, this.scene, this.glowTex);
       v.pos.set(p.x, p.y, p.z);
       v.inst.root.position.copy(v.pos);
       this.views.set(id, v);
@@ -269,8 +338,7 @@ export class Enemies {
     // enemies gone from the latest snapshot without a kill event (reset, kamikaze cleanup)
     for (const v of this.views.values()) {
       if (!v.dead && now - v.lastSeen > staleAfter) {
-        v.dispose(this.scene);
-        this.views.delete(v.id);
+        this.release(v);
       }
     }
   }
@@ -441,10 +509,7 @@ export class Enemies {
       if (v.dead) {
         v.deadT += dt;
         if (!v.gibbed && v.deadT > 1.4) v.inst.root.position.y -= dt * 1.2;
-        if (v.deadT > 3) {
-          v.dispose(this.scene);
-          this.views.delete(v.id);
-        }
+        if (v.deadT > 3) this.release(v);
         continue;
       }
       v.inst.root.position.copy(v.pos);
@@ -542,9 +607,18 @@ export class Enemies {
     return null;
   }
 
+  /** Loading-screen warm-up: one of every kind (one of them elite), animated, around `at`. */
+  warm(at: Vec3): void {
+    ENEMY_KINDS.forEach((k, i) => {
+      const v = this.ensure(-(i + 1), k, { x: at.x + (i - 3) * 2.6, y: at.y, z: at.z });
+      v.play('move');
+      if (i === 0) v.setElite(1, this.glowTex);
+    });
+    this.update(1 / 60, performance.now() / 1000);
+  }
+
   clear(): void {
-    for (const v of this.views.values()) v.dispose(this.scene);
-    this.views.clear();
+    for (const v of [...this.views.values()]) this.release(v);
   }
 }
 
