@@ -75,7 +75,7 @@ Solo play never touches the server: the full simulation runs in the browser.
 
 ## Architecture
 ```
-shared/   arena collision, movement physics, the authoritative GameSim (enemies, AI, waves, pickups), protocol, tuning
+shared/   arena collision, movement physics, the authoritative GameSim (enemies, AI, waves, pickups), roguelike runs and upgrades, protocol, tuning
 server/   Colyseus room wrapping GameSim for co-op (room codes, 30 Hz simulation and snapshots), live status page
 client/   Three.js renderer (low-res target + dither post), weapons, FX, HUD, audio + procedural music, interpolation
 tools/    asset build scripts and a headless play-test harness
@@ -87,6 +87,10 @@ tools/    asset build scripts and a headless play-test harness
   - Hit claims come from the client that saw the hit and are validated and rate-limited on the server.
   - Incoming damage is checked against the victim's own position, so dodges are judged on what the player saw.
 - Humanoid enemies share one skeleton and one animation library, built from the source packs by `tools/build-humanoids.mjs`.
+- **No mid-fight hitches:**
+  - Every enemy, effect and weapon model is drawn once behind the loading screen, so shaders compile before play.
+  - Enemy models are recycled instead of cloned for each spawn.
+  - Co-op rides out late network packets by extrapolating for up to 250 ms.
 
 ## Development tools
 ```bash
@@ -94,6 +98,7 @@ node tools/capture.mjs solo --seconds 40 --shots 6        # autoplay bot: screen
 node tools/capture.mjs solo --wave 8 --god --seconds 30    # jump straight to the boss
 node tools/capture.mjs coop --seconds 40                   # two real clients over the network
 node tools/sfxprobe.mjs && node tools/mixprobe.mjs         # measure sound levels and the final mix
+npx tsx tools/runsim.ts 1234 2                             # play a whole roguelike run headlessly and print every room
 ```
 - URL flags: `?autostart=solo|host|join&code=XXXX&bot=1&mute=1&wave=N&god=1`
 - Dev pages:
@@ -102,10 +107,18 @@ node tools/sfxprobe.mjs && node tools/mixprobe.mjs         # measure sound level
 - Live player status: `/status` on the game server. It's private: viewable from localhost, or with `?key=` when hosted.
 
 ## Roadmap
-Next up is a **roguelike mode**:
-- a branching run of generated rooms across three layers, each ending in a boss
-- upgrades that change how you move and shoot, bought with style points
-- unlocks between runs
+A **roguelike mode** is in development. It runs locally and isn't on the public menu yet.
+- **Already working:**
+  - three layers of six rooms and a boss
+  - a gate choice after every room, showing its prize: forge, repair, style cache, elite or challenge
+  - forges with upgrades bought with style
+  - new alt-fires for every gun: Charge Beam, Spinshot, Pump Charge, Jackhammer, Freezeframe
+  - movement and blood upgrades
+- **Next:**
+  - a loadout menu so Classic can try every upgrade
+  - rooms generated from hand-made pieces
+  - a route map
+  - unlocks between runs
 
 The 8-wave campaign stays as **Classic**.
 
