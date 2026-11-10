@@ -4,7 +4,7 @@
 Dash, slide, slam and wall-jump through a molten foundry while you shoot, parry and punch your way through eight waves and a boss. Blood is fuel: you heal by hurting things up close.
 
 ### [Play it now: ferrocide.pages.dev](https://ferrocide.pages.dev)
-Runs in any modern desktop browser. No install, no account. Solo starts instantly; co-op takes a 4-letter room code.
+Runs in any modern browser, on desktop and on phones and tablets (landscape, with on-screen controls). No install, no account. Solo starts instantly; co-op takes a 4-letter room code.
 
 ![Wave 6 in the foundry](docs/screenshots/combat.jpg)
 
@@ -41,6 +41,22 @@ Runs in any modern desktop browser. No install, no account. Solo starts instantl
 | F / middle mouse | punch · **parry** yellow projectiles (pressing a beat early still counts) |
 | 1 2 3 · wheel · Q | weapons · last weapon |
 | Esc | pause |
+
+### On a phone or tablet
+Open the same link and turn the device sideways. The game switches to touch controls by itself.
+
+| Input | Action |
+|---|---|
+| left thumb, anywhere on the left | move (a stick appears under your thumb) |
+| right thumb, drag | aim |
+| FIRE / ALT | fire / alt-fire. Keep holding and drag to aim while shooting |
+| JUMP · DASH · SLIDE · PUNCH | same moves as on desktop |
+| 1 2 3 | weapons |
+| II | pause |
+
+- **Auto fire** shoots while your crosshair is on an enemy, and **aim assist** eases the crosshair toward enemies near it. Both are on by default and can be turned off in Settings.
+- Android goes fullscreen when you tap to start. On an iPhone, use Share → **Add to Home Screen** to play without the browser bars.
+- `?touch=1` forces touch controls on any device, `?touch=0` turns them off.
 
 ## The arsenal
 | Weapon | Primary | Alt-fire (RMB) |
@@ -121,6 +137,11 @@ A **roguelike mode** is in development. It runs locally and isn't on the public 
   - unlocks between runs
 
 The 8-wave campaign stays as **Classic**.
+
+## For Meowshi
+The orange tabby with the green collar and gold bell, sitting by the fire where every run begins, is Meowshi. He was a friend's cat, and he is remembered here. Walk up to him and he'll say hello.
+
+![Meowshi, keeper of the flame](docs/screenshots/meowshi.jpg)
 
 ## Credits
 All third-party assets are free to use:

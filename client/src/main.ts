@@ -12,6 +12,8 @@ import { Game, type ForgeOffers, type GameOverInfo } from './game/Game';
 import { finalGrade } from './game/style';
 import { ColyseusLink, LocalLink, serverHttp, wakeServer, type NetLink } from './net/link';
 import { loadSettings, saveSettings, type Settings } from './settings';
+import { isTouch } from './platform';
+import { TouchControls } from './game/touch';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ui = document.getElementById('ui') as HTMLElement;
@@ -26,6 +28,33 @@ const runsEnabled = ['localhost', '127.0.0.1'].includes(location.hostname) || pa
 const audio = new Audio();
 if (params.get('mute') === '1') settings.master = 0;
 const input = new Input(canvas);
+input.touch = isTouch;
+let touchUi: TouchControls | null = null;
+if (isTouch) {
+  document.body.classList.add('touch');
+  // Phones are short in landscape: scale the menus and HUD (designed for ~720px tall) to fit,
+  // and size the on-screen buttons from the screen height.
+  const fit = () => {
+    // the on-screen keyboard shrinks the viewport: don't rescale everything while typing
+    if (document.activeElement instanceof HTMLInputElement && document.activeElement.type === 'text') return;
+    const w = window.innerWidth, hh = window.innerHeight;
+    const st = document.documentElement.style;
+    st.setProperty('--ui-scale', String(Math.max(0.5, Math.min(1, hh / 580, w / 1180))));
+    st.setProperty('--hud-scale', String(Math.max(0.5, Math.min(1, hh / 640))));
+    st.setProperty('--ts', String(Math.max(0.8, Math.min(1.5, hh / 390))));
+    // turned upright mid-fight: pause until the phone is back in landscape
+    if (hh > w && input.locked) input.exitLock();
+  };
+  fit();
+  window.addEventListener('resize', fit);
+  // leaving the tab or locking the phone pauses and silences the game
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (input.locked) input.exitLock();
+      void audio.ctx.suspend();
+    } else audio.resume();
+  });
+}
 let game: Game;
 let screen: HTMLElement | null = null;
 let clickGate: HTMLElement | null = null;
@@ -94,19 +123,24 @@ async function boot(): Promise<void> {
   window.addEventListener('pagehide', () => game.link?.leave());
   game.startLoop();
   startPresence();
-  document.addEventListener('pointerlockchange', () => {
+  if (isTouch) {
+    touchUi = new TouchControls(ui, input, () => input.exitLock());
+    setInterval(() => touchUi?.setWeapon(game.weapons.index), 120);
+  }
+  input.onLockChange = (locked) => {
+    touchUi?.setActive(locked && game?.mode === 'play');
     if (!game || game.mode !== 'play' || botMode) return;
-    if (document.pointerLockElement === canvas) {
+    if (locked) {
       clickGate?.remove();
       clickGate = null;
       game.setPaused(false);
     } else if (!screen && game.phase !== 'over' && game.phase !== 'victory' && !lobbyOpen) {
       game.setPaused(true);
     }
-  });
+  };
   // safety net: if the game is running but the mouse isn't captured, a click on it recaptures
   canvas.addEventListener('mousedown', () => {
-    if (game.mode === 'play' && !botMode && !screen && !pauseEl && !clickGate && document.pointerLockElement !== canvas) input.requestLock();
+    if (game.mode === 'play' && !botMode && !screen && !pauseEl && !clickGate && !input.locked) input.requestLock();
   });
   const auto = params.get('autostart');
   if (auto === 'solo') startSolo(runsEnabled && params.get('mode') === 'run' ? 'run' : 'classic');
@@ -161,9 +195,10 @@ function mainMenu(error = ''): void {
     <div class="menu-right">
       <h3>FIELD NOTES</h3>
       <p><span class="k">BLOOD IS FUEL.</span> Hurting enemies up close heals you. Part of each hit you take lingers before it can heal.</p>
-      <p><span class="k">PARRY <b>YELLOW</b>.</span> Punch (F) glowing orbs, bolts and mortars straight back, or punch a husk mid-swing.</p>
+      <p><span class="k">PARRY <b>YELLOW</b>.</span> Punch ${isTouch ? '' : '(F) '}glowing orbs, bolts and mortars straight back, or punch a husk mid-swing.</p>
       <p><span class="k">STYLE PAYS.</span> Toss a coin, then shoot it. Shoot your own shotgun core. Rotate weapons: repeat kills score less.</p>
       <p><span class="k">RED CRYSTALS</span> restore health, but respawn slowly.</p>
+      <p><span class="k">FOR MEOWSHI.</span> He keeps the flame on the dais. Go and say hello.</p>
       ${runsEnabled ? '<p><span class="k">RUNS.</span> Three layers of six rooms and a boss. Pick a gate after every room, forge upgrades that change your guns and movement, spend style on more.</p>' : ''}
     </div>
   `, 'menu-layout');
@@ -183,22 +218,30 @@ function mainMenu(error = ''): void {
 }
 
 function controlsScreen(back: () => void): void {
+  const ALT = isTouch ? 'ALT' : 'RMB';
   const el = h(`
     <div class="panel">
       <h2>CONTROLS</h2>
       <div class="controls">
+        ${isTouch ? `
+        <div><b>LEFT THUMB</b> move · press anywhere on the left</div><div><b>RIGHT THUMB</b> drag to aim</div>
+        <div><b>FIRE / ALT</b> hold, and drag to aim while shooting</div><div><b>JUMP</b> jump · wall jump ×3</div>
+        <div><b>DASH</b> i-frames, 3 charges</div><div><b>SLIDE</b> slide · in air: ground slam</div>
+        <div><b>PUNCH</b> punch · parry</div><div><b>1 2 3</b> weapons</div>
+        <div><b>SLAM → JUMP</b> slam bounce (higher from higher)</div><div><b>SLIDE → JUMP</b> keeps momentum</div>
+        <div><b>AUTO FIRE</b> shoots while your crosshair is on an enemy</div><div><b>AIM ASSIST</b> both can be turned off in Settings</div>` : `
         <div><b>WASD</b> move</div><div><b>MOUSE</b> aim</div>
         <div><b>SPACE</b> jump · wall jump ×3</div><div><b>SHIFT</b> dash (i-frames, 3 charges)</div>
         <div><b>C / CTRL</b> slide · in air: ground slam</div><div><b>SLAM → JUMP</b> slam bounce (higher from higher)</div>
         <div><b>LMB</b> fire</div><div><b>RMB</b> alt fire</div>
         <div><b>F / MMB</b> punch · parry</div><div><b>1 2 3 / WHEEL / Q</b> weapons</div>
-        <div><b>ESC</b> pause</div><div><b>SLIDE → JUMP</b> keeps momentum</div>
+        <div><b>ESC</b> pause</div><div><b>SLIDE → JUMP</b> keeps momentum</div>`}
       </div>
       <h2 style="margin-top:18px">ARSENAL</h2>
       <div class="controls">
-        <div><b>PIERCER</b> piercing revolver</div><div>RMB tosses a coin — shoot it to ricochet into a head</div>
-        <div><b>SCATTERHAMMER</b> shotgun</div><div>RMB lobs a core — shoot or punch it to detonate</div>
-        <div><b>SLAGTHROWER</b> rockets</div><div>hold RMB to steer rockets to your crosshair · tap to airburst · rocket jump!</div>
+        <div><b>PIERCER</b> piercing revolver</div><div>${ALT} tosses a coin — shoot it to ricochet into a head</div>
+        <div><b>SCATTERHAMMER</b> shotgun</div><div>${ALT} lobs a core — shoot or punch it to detonate</div>
+        <div><b>SLAGTHROWER</b> rockets</div><div>hold ${ALT} to steer rockets to your crosshair · tap to airburst · rocket jump!</div>
         <div><b>PARRY</b> punch yellow orbs/mortars</div><div>press a beat early, it still counts · reflects them, heals ${50} HP</div>
       </div>
       ${runsEnabled ? `<h2 style="margin-top:18px">RUNS</h2>
@@ -228,7 +271,7 @@ function settingsScreen(back: () => void): void {
   const el = h(`
     <div class="panel">
       <h2>SETTINGS</h2>
-      <div class="setting"><span>MOUSE SENSITIVITY</span><input type="range" id="sens" min="0.1" max="4" step="0.05" value="${s.sensitivity}"><span id="sensv"></span></div>
+      <div class="setting"><span>${isTouch ? 'LOOK SENSITIVITY' : 'MOUSE SENSITIVITY'}</span><input type="range" id="sens" min="0.1" max="4" step="0.05" value="${s.sensitivity}"><span id="sensv"></span></div>
       <div class="setting"><span>FIELD OF VIEW</span><input type="range" id="fov" min="75" max="125" step="1" value="${s.fov}"><span id="fovv"></span></div>
       <div class="setting"><span>MASTER VOLUME</span><input type="range" id="master" min="0" max="1" step="0.05" value="${s.master}"><span id="masterv"></span></div>
       <div class="setting"><span>MUSIC</span><input type="range" id="music" min="0" max="1" step="0.05" value="${s.music}"><span id="musicv"></span></div>
@@ -240,7 +283,9 @@ function settingsScreen(back: () => void): void {
       <div class="setting"><span>DITHERING</span><input type="checkbox" id="dither" ${s.dither ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>INVERT Y</span><input type="checkbox" id="inv" ${s.invertY ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>SHOW FPS</span><input type="checkbox" id="fpsbox" ${s.showFps ? 'checked' : ''}><span></span></div>
-      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>LOW FPS? TURN ON HARDWARE ACCELERATION IN YOUR BROWSER SETTINGS.</div>
+      ${isTouch ? `<div class="setting"><span>AUTO FIRE</span><input type="checkbox" id="autofire" ${s.autoFire ? 'checked' : ''}><span></span></div>
+      <div class="setting"><span>AIM ASSIST</span><input type="checkbox" id="assist" ${s.aimAssist ? 'checked' : ''}><span></span></div>` : ''}
+      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>${isTouch ? 'LOW FPS? TRY A LOWER RENDER RESOLUTION.' : 'LOW FPS? TURN ON HARDWARE ACCELERATION IN YOUR BROWSER SETTINGS.'}</div>
       <div style="margin-top:14px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
@@ -268,6 +313,8 @@ function settingsScreen(back: () => void): void {
   el.querySelector<HTMLInputElement>('#dither')!.addEventListener('change', (e) => { settings.dither = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector<HTMLInputElement>('#inv')!.addEventListener('change', (e) => { settings.invertY = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector<HTMLInputElement>('#fpsbox')!.addEventListener('change', (e) => { settings.showFps = (e.target as HTMLInputElement).checked; apply(); });
+  el.querySelector<HTMLInputElement>('#autofire')?.addEventListener('change', (e) => { settings.autoFire = (e.target as HTMLInputElement).checked; apply(); });
+  el.querySelector<HTMLInputElement>('#assist')?.addEventListener('change', (e) => { settings.aimAssist = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector('#back')!.addEventListener('click', () => { blip(); back(); });
   escBack(el, back);
 }
@@ -389,14 +436,21 @@ function onPhase(p: Phase): void {
 function gate(): void {
   if (botMode) return;
   clickGate?.remove();
-  clickGate = h(`<div class="click-to-play">CLICK TO FIGHT</div><div class="hint">WASD · SPACE · SHIFT dash · C slide/slam · F parry · LMB/RMB fire</div>`, 'screen');
+  clickGate = h(isTouch
+    ? '<div class="click-to-play">TAP TO FIGHT</div><div class="hint">LEFT THUMB moves · RIGHT THUMB aims · hold FIRE and drag to aim while shooting</div>'
+    : '<div class="click-to-play">CLICK TO FIGHT</div><div class="hint">WASD · SPACE · SHIFT dash · C slide/slam · F parry · LMB/RMB fire</div>', 'screen');
   clickGate.style.background = 'rgba(0,0,0,0.35)';
   clickGate.addEventListener('click', () => {
     audio.resume();
     // fullscreen lets the keyboard lock swallow Ctrl+W while sliding
     const root = document.documentElement;
     if (!document.fullscreenElement && root.requestFullscreen) {
-      root.requestFullscreen({ navigationUI: 'hide' }).catch(() => undefined).finally(() => input.requestLock());
+      root.requestFullscreen({ navigationUI: 'hide' }).catch(() => undefined).finally(() => {
+        // phones: hold the screen in landscape while fullscreen (not every browser allows it)
+        const o = window.screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+        if (isTouch) void o?.lock?.('landscape').catch(() => undefined);
+        input.requestLock();
+      });
     } else input.requestLock();
   });
   ui.appendChild(clickGate);

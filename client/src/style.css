@@ -1011,3 +1011,242 @@ button small {
   font-weight: normal;
   margin-right: 8px;
 }
+
+/* ------------------------------------------------------------ touch devices
+   Everything below only applies on phones and tablets (body.touch, set at boot). */
+#rotate {
+  display: none;
+}
+#touch {
+  display: none;
+}
+body.touch {
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+body.touch #game {
+  width: 100%;
+  height: 100%;
+}
+/* keep menus and HUD out from under the notch */
+body.touch #ui {
+  left: env(safe-area-inset-left, 0px);
+  right: env(safe-area-inset-right, 0px);
+}
+/* menus and HUD were laid out for a desktop window: scale them to the phone */
+body.touch .screen,
+body.touch .menu-layout,
+body.touch .toast {
+  zoom: var(--ui-scale, 1);
+}
+body.touch .screen {
+  justify-content: safe center;
+  overflow-y: auto;
+  touch-action: pan-y;
+}
+body.touch .menu-layout {
+  align-items: safe center;
+  overflow-y: auto;
+  touch-action: pan-y;
+  padding: 8px 4vw;
+}
+body.touch .menu-right {
+  margin-bottom: 0;
+  align-self: center;
+}
+body.touch #hud {
+  zoom: var(--hud-scale, 1);
+}
+/* the bottom corners belong to the thumbs: health and weapons move to the top left */
+body.touch .hud-bl {
+  left: 100px;
+  top: 12px;
+  bottom: auto;
+}
+body.touch .partner {
+  left: 100px;
+  top: 170px;
+}
+body.touch .killfeed {
+  right: auto;
+  left: 100px;
+  bottom: auto;
+  top: 240px;
+  text-align: left;
+}
+body.touch .fps-counter {
+  left: auto;
+  right: 28px;
+}
+body.touch .net {
+  right: auto;
+  left: 46%;
+  bottom: 2px;
+}
+body.touch button,
+body.touch input,
+body.touch select {
+  touch-action: manipulation;
+}
+body.touch .setting input[type='checkbox'] {
+  width: 22px;
+  height: 22px;
+}
+
+body.touch #touch {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  touch-action: none;
+  font-family: 'Future', sans-serif;
+  --s: var(--ts, 1);
+}
+body.touch #touch.on {
+  display: block;
+}
+.t-btn,
+.t-slot,
+.t-pause {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.34);
+  background: rgba(10, 8, 10, 0.3);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: calc(10px * var(--s));
+  letter-spacing: 0.08em;
+  text-shadow: 0 1px 2px #000;
+}
+.t-btn {
+  border-radius: 50%;
+}
+.t-btn.on {
+  background: rgba(255, 42, 26, 0.5);
+  border-color: #fff;
+  color: #fff;
+}
+.t-jump {
+  width: calc(76px * var(--s));
+  height: calc(76px * var(--s));
+  right: calc(20px * var(--s));
+  bottom: calc(20px * var(--s));
+}
+.t-fire {
+  width: calc(88px * var(--s));
+  height: calc(88px * var(--s));
+  right: calc(112px * var(--s));
+  bottom: calc(52px * var(--s));
+  border-color: rgba(255, 70, 50, 0.75);
+  font-size: calc(13px * var(--s));
+}
+.t-dash {
+  width: calc(64px * var(--s));
+  height: calc(64px * var(--s));
+  right: calc(22px * var(--s));
+  bottom: calc(108px * var(--s));
+  border-color: rgba(69, 200, 255, 0.7);
+}
+.t-alt {
+  width: calc(62px * var(--s));
+  height: calc(62px * var(--s));
+  right: calc(122px * var(--s));
+  bottom: calc(152px * var(--s));
+}
+.t-punch {
+  width: calc(60px * var(--s));
+  height: calc(60px * var(--s));
+  right: calc(34px * var(--s));
+  bottom: calc(184px * var(--s));
+  border-color: rgba(255, 224, 102, 0.75);
+}
+.t-slide {
+  width: calc(62px * var(--s));
+  height: calc(62px * var(--s));
+  right: calc(212px * var(--s));
+  bottom: calc(18px * var(--s));
+}
+.t-weapons {
+  position: absolute;
+  left: 46%;
+  bottom: calc(10px * var(--s));
+  display: flex;
+  gap: calc(8px * var(--s));
+}
+.t-slot {
+  position: static;
+  width: calc(44px * var(--s));
+  height: calc(40px * var(--s));
+  font-size: calc(15px * var(--s));
+}
+.t-slot.cur {
+  border-color: #fff;
+  background: rgba(255, 42, 26, 0.35);
+  color: #fff;
+}
+.t-pause {
+  left: 8px;
+  top: 8px;
+  width: calc(40px * var(--s));
+  height: calc(40px * var(--s));
+  font-size: calc(14px * var(--s));
+}
+.t-stick {
+  position: absolute;
+  left: calc(120px * var(--s));
+  top: calc(100% - 112px * var(--s));
+  width: 124px;
+  height: 124px;
+  margin: -62px 0 0 -62px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  background: rgba(10, 8, 10, 0.12);
+  pointer-events: none;
+}
+.t-stick.on {
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(10, 8, 10, 0.25);
+}
+.t-stick i {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  border: 2px solid rgba(255, 255, 255, 0.4);
+}
+.t-stick.on i {
+  background: rgba(255, 42, 26, 0.5);
+  border-color: #fff;
+}
+
+@media (orientation: portrait) {
+  body.touch #rotate {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: #000;
+    color: #fff;
+    font-family: 'Future', sans-serif;
+    font-size: 20px;
+    letter-spacing: 0.2em;
+    text-align: center;
+  }
+  body.touch #rotate small {
+    font-family: 'Pixel', monospace;
+    font-size: 11px;
+    color: #9a9ca6;
+  }
+}

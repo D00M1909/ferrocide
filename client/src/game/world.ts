@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { ARENA_HALF, BOXES, HEALTH_PICKUPS, JUMP_PADS, LAVA, WALL_HEIGHT, type Box, type Surface } from '../../../shared/arena';
 import { psxUniforms, psxify, Textures } from '../engine/psx';
 import { sprite } from '../engine/assets';
+import { Meowshi } from './meowshi';
 
 /** Box geometry whose UVs are in world units so textures tile consistently. */
 function boxGeometry(b: Box, texScale: number): THREE.BufferGeometry {
@@ -34,6 +35,8 @@ export class World {
   private flames: THREE.Sprite[] = [];
   private lavaLights: THREE.PointLight[] = [];
   private sky: THREE.Mesh;
+  /** Meowshi, keeper of the flame. Updated by the game, which knows where the camera is. */
+  readonly meowshi: Meowshi;
 
   constructor() {
     const s = this.scene;
@@ -196,6 +199,7 @@ export class World {
     this.addChains();
     this.addBraziers();
     this.addPipes();
+    this.meowshi = new Meowshi(s);
 
     // floating embers
     const N = 260;

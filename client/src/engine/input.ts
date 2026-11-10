@@ -33,6 +33,15 @@ export class Input {
   mouseDY = 0;
   locked = false;
   enabled = false;
+  /** Touch devices have no pointer lock: "locked" simply means the on-screen controls are live. */
+  touch = false;
+  /** Fired whenever capture starts or ends (pointer lock on desktop, the touch equivalent on phones). */
+  onLockChange: ((locked: boolean) => void) | null = null;
+  /** Analog movement from the touch stick, each -1..1. Added to the keys. */
+  stickX = 0;
+  stickY = 0;
+  /** Touch auto-fire: the game holds the trigger while the crosshair is on a target. */
+  autoFire = false;
   /** When set, a bot writes into these instead of the real devices. */
   virtual: { down: Set<Action>; pressed: Set<Action>; dx: number; dy: number } | null = null;
 
@@ -43,11 +52,7 @@ export class Input {
       if (this.locked && (a || e.ctrlKey || e.metaKey)) e.preventDefault();
       if (!a) return;
       if (a === 'scores') e.preventDefault();
-      if (!this.down.has(a)) {
-        this.pressed.add(a);
-        if (LATCHED.includes(a)) this.latched.set(a, performance.now());
-      }
-      this.down.add(a);
+      this.setDown(a, true);
     });
     window.addEventListener('keyup', (e) => {
       const a = BINDINGS[e.code];
@@ -76,14 +81,57 @@ export class Input {
       this.pressed.add(e.deltaY > 0 ? 'next' : 'prev');
     }, { passive: true });
     document.addEventListener('pointerlockchange', () => {
+      if (this.touch) return;
       this.locked = document.pointerLockElement === this.canvas;
       if (!this.locked) { this.down.clear(); this.latched.clear(); }
+      this.onLockChange?.(this.locked);
     });
+  }
+
+  /** Hold or release an action, exactly as a key would (used by the on-screen buttons). */
+  setDown(a: Action, on: boolean): void {
+    if (!on) { this.down.delete(a); return; }
+    if (!this.down.has(a)) {
+      this.pressed.add(a);
+      if (LATCHED.includes(a)) this.latched.set(a, performance.now());
+    }
+    this.down.add(a);
+  }
+
+  /** A one-off press with nothing held (weapon slots, pause). */
+  tap(a: Action): void {
+    this.pressed.add(a);
+  }
+
+  /** Look input in mouse counts from a touch drag. */
+  addLook(dx: number, dy: number): void {
+    if (!this.locked) return;
+    this.mouseDX += dx;
+    this.mouseDY += dy;
+  }
+
+  /** Movement axes: keys plus the touch stick, each clamped to -1..1. */
+  moveAxes(): { forward: number; strafe: number } {
+    const key = (a: Action, b: Action) => (this.isDown(a) ? 1 : 0) - (this.isDown(b) ? 1 : 0);
+    const stick = !this.virtual && this.enabled;
+    return {
+      forward: Math.max(-1, Math.min(1, key('forward', 'back') + (stick ? this.stickY : 0))),
+      strafe: Math.max(-1, Math.min(1, key('right', 'left') + (stick ? this.stickX : 0))),
+    };
+  }
+
+  private setTouchLock(on: boolean): void {
+    if (this.locked === on) return;
+    this.locked = on;
+    if (!on) { this.down.clear(); this.latched.clear(); this.stickX = this.stickY = 0; this.autoFire = false; }
+    // like the real pointerlockchange event, tell listeners after the current call unwinds
+    queueMicrotask(() => this.onLockChange?.(this.locked));
   }
 
   /** Pointer lock + (best effort) fullscreen keyboard lock so Ctrl+W can't close the tab mid-slide. */
   requestLock(): void {
     if (this.virtual) return;
+    if (this.touch) { this.setTouchLock(true); return; }
     // plain lock: raw 'unadjustedMovement' input could come back silent after fullscreen changes
     const r = this.canvas.requestPointerLock() as unknown as Promise<void> | undefined;
     r?.catch?.(() => undefined);
@@ -92,12 +140,13 @@ export class Input {
   }
 
   exitLock(): void {
+    if (this.touch) { this.setTouchLock(false); return; }
     if (document.pointerLockElement) document.exitPointerLock();
   }
 
   isDown(a: Action): boolean {
     if (this.virtual) return this.virtual.down.has(a);
-    return this.enabled && this.down.has(a);
+    return this.enabled && (this.down.has(a) || (a === 'fire' && this.autoFire));
   }
 
   wasPressed(a: Action): boolean {
