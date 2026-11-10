@@ -360,6 +360,65 @@ export class Audio {
     lfo.stop(t + dur + 0.05);
   }
 
+  /** Meowshi's greeting: a small bright meow followed by the jingle of his bell. */
+  meow(at: Vec3): void {
+    const dx = at.x - this.listener.pos.x, dz = at.z - this.listener.pos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 30) return;
+    const t = this.ctx.currentTime;
+    const dur = 0.55;
+    const v = 0.5 * Math.max(0, 1 - dist / 30);
+    const pan = this.ctx.createStereoPanner();
+    const rx = Math.cos(this.listener.yaw), rz = -Math.sin(this.listener.yaw);
+    pan.pan.value = dist > 0.5 ? Math.max(-0.8, Math.min(0.8, (dx * rx + dz * rz) / dist)) : 0;
+    pan.connect(this.synthBus);
+    const send = this.ctx.createGain();
+    send.gain.value = 0.3;
+    pan.connect(send).connect(this.reverbSend);
+    // voice: "me" rises, "ow" falls, while the mouth formant closes
+    const o = this.ctx.createOscillator();
+    o.type = 'sawtooth';
+    const base = 560 + Math.random() * 60;
+    o.frequency.setValueAtTime(base * 0.85, t);
+    o.frequency.linearRampToValueAtTime(base * 1.3, t + 0.14);
+    o.frequency.exponentialRampToValueAtTime(base * 0.8, t + dur);
+    const f1 = this.ctx.createBiquadFilter();
+    f1.type = 'bandpass';
+    f1.Q.value = 3.5;
+    f1.frequency.setValueAtTime(2400, t);
+    f1.frequency.exponentialRampToValueAtTime(950, t + dur);
+    const f2 = this.ctx.createBiquadFilter();
+    f2.type = 'bandpass';
+    f2.Q.value = 5;
+    f2.frequency.value = 3200;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(v, t + 0.06);
+    g.gain.setValueAtTime(v, t + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    const g2 = this.ctx.createGain();
+    g2.gain.value = 0.35;
+    o.connect(f1).connect(g);
+    o.connect(f2).connect(g2).connect(g);
+    g.connect(pan);
+    o.start(t);
+    o.stop(t + dur + 0.05);
+    // bell: two inharmonic partials, struck twice
+    for (const [delay, lvl] of [[0.5, 1], [0.68, 0.6]]) {
+      for (const [f, a] of [[2637, 0.16], [4186, 0.08]]) {
+        const b = this.ctx.createOscillator();
+        b.type = 'sine';
+        b.frequency.value = f;
+        const bg = this.ctx.createGain();
+        bg.gain.setValueAtTime(a * lvl * v * 2, t + delay);
+        bg.gain.exponentialRampToValueAtTime(0.0001, t + delay + 0.35);
+        b.connect(bg).connect(pan);
+        b.start(t + delay);
+        b.stop(t + delay + 0.4);
+      }
+    }
+  }
+
   /** Crossfade to a piece of the procedural soundtrack. */
   async playMusic(id: MusicId | null, fade = 2): Promise<void> {
     this.music.play(id, fade);

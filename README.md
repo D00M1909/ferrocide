@@ -122,6 +122,11 @@ A **roguelike mode** is in development. It runs locally and isn't on the public 
 
 The 8-wave campaign stays as **Classic**.
 
+## For Meowshi
+The orange tabby with the green collar and gold bell, sitting by the fire where every run begins, is Meowshi. He was a friend's cat, and he is remembered here. Walk up to him and he'll say hello.
+
+![Meowshi, keeper of the flame](docs/screenshots/meowshi.jpg)
+
 ## Credits
 All third-party assets are free to use:
 - **Quaternius** (CC0): enemy, partner and weapon models; the Universal Base Characters, Modular Outfits and Universal Animation Library

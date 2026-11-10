@@ -213,7 +213,8 @@ export class Game {
     this.lastRaf = performance.now();
     const frame = (t: number) => {
       if (!this.running) return;
-      const dt = Math.min(0.05, (t - this.lastRaf) / 1000);
+      // the first callback's timestamp can predate lastRaf (it marks the frame's start): never step backwards
+      const dt = Math.max(0, Math.min(0.05, (t - this.lastRaf) / 1000));
       this.lastRaf = t;
       this.fps = this.fps * 0.95 + (dt > 0 ? 1 / dt : 60) * 0.05;
       this.frame(dt);
@@ -847,6 +848,7 @@ export class Game {
     }
     this.fx.update(worldDt);
     this.world.update(worldDt, this.time);
+    this.world.meowshi.update(worldDt, this.time, this.camera.position, this.alive && !this.paused ? this.audio : null);
     this.gates.update(worldDt);
     this.style.update(worldDt, this.phase === 'combat');
 
@@ -1094,6 +1096,7 @@ export class Game {
     if (Math.abs(this.camera.fov - 80) > 0.1) { this.camera.fov = 80; this.camera.updateProjectionMatrix(); }
     this.fx.update(dt);
     this.world.update(dt, this.time);
+    this.world.meowshi.update(dt, this.time, this.camera.position, null);
     this.renderer.post.hurt = 0;
     this.renderer.post.lowHp = 0;
     this.renderer.post.flashAmount = 0;

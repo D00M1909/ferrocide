@@ -164,6 +164,7 @@ function mainMenu(error = ''): void {
       <p><span class="k">PARRY <b>YELLOW</b>.</span> Punch (F) glowing orbs, bolts and mortars straight back, or punch a husk mid-swing.</p>
       <p><span class="k">STYLE PAYS.</span> Toss a coin, then shoot it. Shoot your own shotgun core. Rotate weapons: repeat kills score less.</p>
       <p><span class="k">RED CRYSTALS</span> restore health, but respawn slowly.</p>
+      <p><span class="k">FOR MEOWSHI.</span> He keeps the flame on the dais. Go and say hello.</p>
       ${runsEnabled ? '<p><span class="k">RUNS.</span> Three layers of six rooms and a boss. Pick a gate after every room, forge upgrades that change your guns and movement, spend style on more.</p>' : ''}
     </div>
   `, 'menu-layout');
