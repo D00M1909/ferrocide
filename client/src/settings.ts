@@ -10,6 +10,8 @@ export interface Settings {
   shake: number;
   invertY: boolean;
   showFps: boolean;
+  autoFire: boolean; // touch only: shoot while the crosshair is on an enemy
+  aimAssist: boolean; // touch only: ease the crosshair toward nearby enemies
 }
 
 const DEFAULTS: Settings = {
@@ -24,6 +26,8 @@ const DEFAULTS: Settings = {
   shake: 1,
   invertY: false,
   showFps: false,
+  autoFire: true,
+  aimAssist: true,
 };
 
 const KEY = 'ferrocide.settings.v1';

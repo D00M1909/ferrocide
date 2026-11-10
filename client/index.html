@@ -2,7 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="FERROCIDE" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/icon-180.png" />
     <title>FERROCIDE</title>
     <meta name="description" content="A fast retro co-op arena shooter. Blood is fuel." />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%23100404'/><path d='M3 3h10v3H7v2h5v3H7v3H3z' fill='%23ff2a2a'/></svg>" />
@@ -11,6 +18,7 @@
   <body>
     <canvas id="game"></canvas>
     <div id="ui"></div>
+    <div id="rotate"><div>ROTATE YOUR PHONE</div><small>FERROCIDE PLAYS IN LANDSCAPE</small></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

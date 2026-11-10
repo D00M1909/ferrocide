@@ -3,7 +3,8 @@
 import * as THREE from 'three';
 import { ENEMIES, PLAYER, PLAYER_SEND_RATE, SLAM, VARIANTS, WEAPON_ORDER } from '../../../shared/constants';
 import { Motor, type MoveInput } from '../../../shared/movement';
-import { HEALTH_PICKUPS, blockedAt } from '../../../shared/arena';
+import { HEALTH_PICKUPS, blockedAt, lineOfSight, raycastWorld } from '../../../shared/arena';
+import { angleDiff } from '../../../shared/math';
 import { PF, type GameEvent, type GameMode, type HitKind, type Phase, type PlayerStats, type RunSnap, type Snapshot, type V } from '../../../shared/protocol';
 import { CHALLENGE_INFO, FINAL_DEPTH, GATE_SPOTS, REWARD_INFO, RUN, layerOf, roomOf } from '../../../shared/run';
 import { UPGRADE_BY_ID } from '../../../shared/upgrades';
@@ -69,6 +70,8 @@ export class Game {
   waveLeft = 0;
   phaseTimer = 0;
   private time = 0;
+  private autoFireT = 0;
+  private assistTmp = new THREE.Vector3();
   private acc = 0;
   private sendAcc = 0;
   private eyeH: number = PLAYER.eyeHeight;
@@ -783,12 +786,14 @@ export class Game {
       this.pitch -= mouse[1] * sens * (this.settings.invertY ? -1 : 1);
       this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch));
     }
+    this.touchAssist(dt);
 
     // move: fixed 120 Hz substeps; latched presses are handed to the first substep that runs
     const canMove = this.alive && !this.paused && this.phase !== 'over' && this.phase !== 'victory';
+    const axes = this.input.moveAxes();
     const base: MoveInput = {
-      forward: canMove ? (this.input.isDown('forward') ? 1 : 0) - (this.input.isDown('back') ? 1 : 0) : 0,
-      strafe: canMove ? (this.input.isDown('right') ? 1 : 0) - (this.input.isDown('left') ? 1 : 0) : 0,
+      forward: canMove ? axes.forward : 0,
+      strafe: canMove ? axes.strafe : 0,
       jumpPressed: false,
       jumpHeld: canMove && this.input.isDown('jump'),
       dashPressed: false,
@@ -991,6 +996,55 @@ export class Game {
     return { hp: b.effectiveHp, max: Math.max(b.maxHp, ENEMIES.colossus.hp * coop) };
   }
 
+  /**
+   * Touch only. Thumbs can't aim like a mouse, so two optional helpers (both in Settings):
+   * aim assist eases the crosshair toward an enemy that is already close to it, and auto-fire
+   * holds the trigger while the crosshair is actually on one. Hits are still real hitscans.
+   */
+  private touchAssist(dt: number): void {
+    const inp = this.input;
+    inp.autoFire = false;
+    if (!inp.touch || this.bot || !this.alive || this.paused || !inp.locked) return;
+    const s = this.settings;
+    if (!s.autoFire && !s.aimAssist) return;
+    const eye = this.eyePos();
+    if (s.aimAssist) {
+      const cp = Math.cos(this.pitch);
+      const fx = -Math.sin(this.yaw) * cp, fy = Math.sin(this.pitch), fz = -Math.cos(this.yaw) * cp;
+      const CONE = 0.17; // ~10 degrees
+      let best: THREE.Vector3 | null = null, bestAng = CONE;
+      for (const v of this.enemies.views.values()) {
+        if (v.dead || v.spawnT > 0.5) continue;
+        const c = v.centre(this.assistTmp);
+        const dx = c.x - eye.x, dy = c.y - eye.y, dz = c.z - eye.z;
+        const d = Math.hypot(dx, dy, dz);
+        if (d < 1.5 || d > 70) continue;
+        const ang = Math.acos(Math.max(-1, Math.min(1, (dx * fx + dy * fy + dz * fz) / d)));
+        if (ang < bestAng) { bestAng = ang; best = (best ?? new THREE.Vector3()).copy(c); }
+      }
+      if (best && lineOfSight(eye, best)) {
+        const dx = best.x - eye.x, dy = best.y - eye.y, dz = best.z - eye.z;
+        const wantYaw = Math.atan2(-dx, -dz), wantPitch = Math.atan2(dy, Math.hypot(dx, dz));
+        // a soft pull, strongest in the middle of the cone: easy to drag away from
+        const k = (1 - Math.exp(-dt * 4.5)) * (1 - bestAng / CONE * 0.5);
+        this.yaw += angleDiff(this.yaw, wantYaw) * k;
+        this.pitch += (wantPitch - this.pitch) * k;
+      }
+    }
+    if (s.autoFire) {
+      const cp = Math.cos(this.pitch);
+      const fwd = { x: -Math.sin(this.yaw) * cp, y: Math.sin(this.pitch), z: -Math.cos(this.yaw) * cp };
+      const w = this.weapons.current;
+      const range = w === 'shotgun' ? 15 : w === 'launcher' ? 60 : 90;
+      const wall = raycastWorld(eye, fwd, range);
+      const hit = this.enemies.raycast(eye, fwd, wall ? wall.dist : range)[0];
+      // rockets wait until the target is far enough not to catch you in the blast
+      if (hit && !(w === 'launcher' && hit.dist < 7)) this.autoFireT = 0.12;
+      this.autoFireT = Math.max(0, this.autoFireT - dt);
+      inp.autoFire = this.autoFireT > 0;
+    }
+  }
+
   private eyePos(): THREE.Vector3 {
     const m = this.motor;
     return new THREE.Vector3(m.pos.x, m.pos.y + this.eyeH - this.landDip, m.pos.z);
@@ -1059,7 +1113,7 @@ export class Game {
     const wantEye = !this.alive ? 0.3 : m.sliding ? PLAYER.slideEyeHeight : PLAYER.eyeHeight;
     this.eyeH += (wantEye - this.eyeH) * Math.min(1, dt * (this.alive ? 14 : 3));
     this.landDip = Math.max(0, this.landDip - dt * 1.6);
-    const strafe = (this.input.isDown('right') ? 1 : 0) - (this.input.isDown('left') ? 1 : 0);
+    const strafe = this.input.moveAxes().strafe;
     const wantRoll = !this.alive ? 0.5 : -strafe * 0.018 + (m.sliding ? 0.05 : 0);
     this.roll += (wantRoll - this.roll) * Math.min(1, dt * 8);
     this.fovKick = Math.max(0, this.fovKick - dt * 4);
