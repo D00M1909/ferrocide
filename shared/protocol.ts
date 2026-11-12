@@ -111,6 +111,8 @@ export interface Snapshot {
   pk: number; // bitmask of health pickups currently available (index into HEALTH_PICKUPS)
   mode?: GameMode;
   run?: RunSnap;
+  /** True once the players carried on past the campaign; the wave number then counts past CLASSIC_WAVES. */
+  endless?: boolean;
 }
 
 export type Phase = 'lobby' | 'intermission' | 'combat' | 'choice' | 'forge' | 'over' | 'victory';
@@ -141,7 +143,8 @@ export type GameEvent =
   | { t: 'pickup'; i: number; pid: string }
   | { t: 'pdie'; pid: string }
   | { t: 'prespawn'; pid: string; p: V }
-  | { t: 'wave'; n: number; total: number; title: string; boss: boolean }
+  | { t: 'wave'; n: number; total: number; title: string; boss: boolean; endless?: boolean }
+  | { t: 'endless'; wave: number } // the host carried on past the campaign: close the victory screen
   | { t: 'clear'; n: number }
   | { t: 'atk'; id: number; a: string; dur: number; target?: V }
   | { t: 'melee'; id: number; aid: number; p: V; r: number; d: number }
@@ -154,7 +157,7 @@ export type GameEvent =
   | { t: 'revive'; pid: string; by: string }
   | { t: 'enrage'; id: number }
   | { t: 'fx'; from: string; fx: FxMsg }
-  | { t: 'over'; win: boolean; wave: number; time: number; stats: PlayerStats[]; mode?: GameMode; ups?: Record<string, string[]> }
+  | { t: 'over'; win: boolean; wave: number; time: number; stats: PlayerStats[]; mode?: GameMode; ups?: Record<string, string[]>; endless?: boolean }
   | { t: 'gates'; gates: Gate[] }
   | { t: 'gate'; i: number; by: string }
   | { t: 'room'; d: number; layer: string; title: string; boss: boolean; elite: boolean; ch?: Challenge; prize?: Reward }

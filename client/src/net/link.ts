@@ -31,6 +31,8 @@ export interface NetLink {
   forge(m: ForgeMsg): void;
   start(mode: GameMode): void;
   retry(): void;
+  /** Host only: after the campaign victory, carry on with generated waves (CLASSIC_WAVES + 1, ...). */
+  continueEndless(): void;
   update(dt: number): void;
   leave(): void;
 }
@@ -65,6 +67,7 @@ export class LocalLink implements NetLink {
   forge(m: ForgeMsg): void { this.sim.playerForge(this.id, m); this.flush(); }
   start(mode: GameMode): void { this.sim.start(this.startWave, mode, this.ups); }
   retry(): void { this.sim.retry(); }
+  continueEndless(): void { this.sim.continueEndless(); this.flush(); }
 
   update(dt: number): void {
     const step = 1 / SERVER_TICK;
@@ -186,6 +189,7 @@ export class ColyseusLink implements NetLink {
   forge(m: ForgeMsg): void { this.room.send('forge', m); }
   start(mode: GameMode): void { this.room.send('start', { mode }); }
   retry(): void { this.room.send('retry', 1); }
+  continueEndless(): void { this.room.send('continue', 1); }
   update(): void { /* network pushes to us */ }
 
   leave(): void {

@@ -32,6 +32,8 @@ export class Bot {
   private target: EnemyView | null = null;
   private wanderT = 0;
   private wander = new THREE.Vector3();
+  private endless = new URLSearchParams(location.search).get('endless') === '1';
+  private continued = false;
 
   constructor(private input: Input) {
     input.virtual = { down: new Set(), pressed: new Set(), dx: 0, dy: 0 };
@@ -47,8 +49,17 @@ export class Bot {
     else d.delete(a);
   }
 
+  /** ?endless=1: on the campaign victory, ask the host link to carry on (the game exposes itself as window.__game). */
+  private autoContinue(): void {
+    if (!this.endless) return;
+    const g = (window as unknown as { __game?: { phase?: string; link?: { isHost: boolean; continueEndless(): void } } }).__game;
+    if (g?.phase !== 'victory') { this.continued = false; return; }
+    if (!this.continued && g.link?.isHost) { this.continued = true; g.link.continueEndless(); }
+  }
+
   /** Returns the yaw/pitch the bot wants this frame. */
   update(dt: number, v: BotView): { yaw: number; pitch: number } {
+    this.autoContinue();
     for (const a of ['forward', 'back', 'left', 'right', 'fire', 'slide', 'jump'] as Action[]) this.hold(a, false);
     if (!v.alive) return { yaw: v.yaw, pitch: v.pitch };
     if (v.gate) {

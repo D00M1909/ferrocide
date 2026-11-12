@@ -29,6 +29,8 @@ export class HUD {
   private bankEl = el('div', 'bank');
   private toastEl = el('div', 'hud-toast');
   private toastT = 0;
+  private tipEl = el('div', 'hud-tip');
+  private tipT = 0;
   private trial = el('div', 'trial');
   private rank = el('div', 'rank');
   private rankNum = el('div', 'rank-num');
@@ -128,7 +130,7 @@ export class HUD {
       dd.appendChild(a);
       this.dmgArcs.push(a);
     }
-    this.root.append(dd, this.net, this.fps, this.killfeed, this.toastEl);
+    this.root.append(dd, this.net, this.fps, this.killfeed, this.toastEl, this.tipEl);
   }
 
   show(v: boolean): void {
@@ -137,7 +139,7 @@ export class HUD {
 
   update(dt: number, s: {
     hp: number; hard: number; stamina: number; weapon: WeaponId; alt: string; variant: string; impact: number; style: StyleMeter;
-    wave: number; waves: number; title: string; left: number; phase: string; timer: number;
+    wave: number; waves: number; endless: boolean; title: string; left: number; phase: string; timer: number;
     boss: { hp: number; max: number } | null; ping: number; online: boolean; fps: number | null;
     run: RunSnap | null; bank: number;
   }): void {
@@ -174,6 +176,10 @@ export class HUD {
     if (s.run) this.bankEl.textContent = `◆ ${s.bank.toLocaleString('en-US')} STYLE`;
     this.toastT = Math.max(0, this.toastT - dt);
     this.toastEl.style.opacity = this.toastT > 0 ? String(Math.min(1, this.toastT * 3)) : '0';
+    if (this.tipT > 0) {
+      this.tipT = Math.max(0, this.tipT - dt);
+      this.tipEl.style.opacity = String(Math.min(1, this.tipT * 2.5));
+    }
 
     // style
     const r = s.style.rank;
@@ -208,7 +214,7 @@ export class HUD {
       this.waveTitle.textContent = '';
       this.waveLeft.textContent = '';
     } else {
-      this.waveTitle.textContent = `WAVE ${s.wave}/${s.waves} — ${s.title}`;
+      this.waveTitle.textContent = s.endless || s.wave > s.waves ? `WAVE ${s.wave} · ENDLESS${s.title ? ` — ${s.title}` : ''}` : `WAVE ${s.wave}/${s.waves} — ${s.title}`;
       this.waveLeft.textContent = s.phase === 'combat' ? `${s.left} HOSTILES REMAIN` : s.phase === 'intermission' ? `INCOMING IN ${Math.ceil(s.timer)}` : '';
     }
     this.boss.style.display = s.boss ? 'block' : 'none';
@@ -260,6 +266,12 @@ export class HUD {
   toast(text: string): void {
     this.toastEl.textContent = text;
     this.toastT = 1.2;
+  }
+
+  /** A first-time hint: stays long enough to read mid-fight. */
+  tip(text: string, time = 5.5): void {
+    this.tipEl.textContent = text;
+    this.tipT = time;
   }
 
   showBanner(text: string, sub = '', time = 2.2): void {

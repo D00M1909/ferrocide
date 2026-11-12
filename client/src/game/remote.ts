@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { angleDiff } from '../../../shared/math';
 import { PF, type PlayerSnap } from '../../../shared/protocol';
-import { instance, playClip, type ModelInstance } from '../engine/assets';
+import { ensurePartnerModel, hasModel, instance, playClip, type ModelInstance } from '../engine/assets';
 
 function nameplate(text: string): THREE.Sprite {
   const c = document.createElement('canvas');
@@ -40,10 +40,17 @@ export class RemotePlayer {
   private mode = '';
   private tag: THREE.Sprite;
   private marker: THREE.Sprite;
+  private disposed = false;
+
+  private buildModel(): ModelInstance {
+    return instance('character_hazmat', { height: 1.8, hue: 0, sat: 1.1, bright: 1.05, emissive: new THREE.Color(0x1a1000), rim: new THREE.Color(0xffc040) });
+  }
 
   constructor(public id: string, public name: string, private scene: THREE.Scene, glow: THREE.Texture) {
-    this.inst = instance('character_hazmat', { height: 1.8, hue: 0, sat: 1.1, bright: 1.05, emissive: new THREE.Color(0x1a1000), rim: new THREE.Color(0xffc040) });
+    this.inst = this.buildModel();
     scene.add(this.inst.root);
+    // the partner model is fetched on demand: until it arrives a stand-in box is shown, then swapped
+    if (!hasModel('character_hazmat')) void ensurePartnerModel().then(() => this.upgradeModel());
     this.tag = nameplate(name);
     this.tag.position.y = 2.25;
     this.inst.root.add(this.tag);
@@ -64,6 +71,22 @@ export class RemotePlayer {
     );
     this.reviveRing.visible = this.reviveFill.visible = false;
     scene.add(this.reviveRing, this.reviveFill);
+  }
+
+  /** Swaps the stand-in for the real character once its file has arrived. */
+  private upgradeModel(): void {
+    if (this.disposed || !hasModel('character_hazmat')) return;
+    const old = this.inst;
+    const fresh = this.buildModel();
+    fresh.root.position.copy(old.root.position);
+    fresh.root.rotation.copy(old.root.rotation);
+    fresh.root.visible = old.root.visible;
+    fresh.root.add(this.tag, this.marker);
+    this.scene.remove(old.root);
+    this.scene.add(fresh.root);
+    this.inst = fresh;
+    this.anim = null;
+    this.mode = '';
   }
 
   apply(a: PlayerSnap | undefined, b: PlayerSnap, t: number): void {
@@ -105,6 +128,22 @@ export class RemotePlayer {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.scene.remove(this.inst.root, this.reviveRing, this.reviveFill);
+  }
+}
+
+/**
+ * Loads the partner model if needed and compiles its shaders now (in the world scene, without drawing),
+ * so the partner's first appearance doesn't stall the frame. Call it when a co-op session starts.
+ */
+export async function warmPartner(gl: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera): Promise<void> {
+  await ensurePartnerModel();
+  if (!hasModel('character_hazmat')) return;
+  const warm = new RemotePlayer('warm', 'WARM', scene, new THREE.Texture());
+  try {
+    await gl.compileAsync(scene, camera);
+  } finally {
+    warm.dispose();
   }
 }

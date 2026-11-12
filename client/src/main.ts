@@ -4,7 +4,7 @@ import { GAME_NAME } from '../../shared/constants';
 import type { GameMode, Phase, WelcomeMsg } from '../../shared/protocol';
 import { FINAL_DEPTH, RUN, isBossDepth, layerOf, roomOf } from '../../shared/run';
 import { UPGRADE_BY_ID, type UpgradeDef } from '../../shared/upgrades';
-import { WAVES } from '../../shared/waves';
+import { CLASSIC_WAVES } from '../../shared/waves';
 import { loadAssets } from './engine/assets';
 import { Audio } from './engine/audio';
 import { Input } from './engine/input';
@@ -39,7 +39,7 @@ if (isTouch) {
     if (document.activeElement instanceof HTMLInputElement && document.activeElement.type === 'text') return;
     const w = window.innerWidth, hh = window.innerHeight;
     const st = document.documentElement.style;
-    st.setProperty('--ui-scale', String(Math.max(0.5, Math.min(1, hh / 580, w / 1180))));
+    st.setProperty('--ui-scale', String(Math.max(0.6, Math.min(1, hh / 580, w / 1180))));
     st.setProperty('--hud-scale', String(Math.max(0.5, Math.min(1, hh / 640))));
     st.setProperty('--ts', String(Math.max(0.8, Math.min(1.5, hh / 390))));
     // turned upright mid-fight: pause until the phone is back in landscape
@@ -54,6 +54,15 @@ if (isTouch) {
       void audio.ctx.suspend();
     } else audio.resume();
   });
+}
+
+/** Keep the phone's screen awake while a fight is on (it would otherwise dim during a long hold). */
+let wakeLock: { release(): Promise<void> } | null = null;
+function setAwake(on: boolean): void {
+  const wl = (navigator as Navigator & { wakeLock?: { request(t: 'screen'): Promise<{ release(): Promise<void> }> } }).wakeLock;
+  if (!isTouch || !wl) return;
+  if (on && !wakeLock) void wl.request('screen').then((l) => { wakeLock = l; }).catch(() => undefined);
+  else if (!on && wakeLock) { void wakeLock.release().catch(() => undefined); wakeLock = null; }
 }
 let game: Game;
 let screen: HTMLElement | null = null;
@@ -108,6 +117,10 @@ async function boot(): Promise<void> {
   game.onReset = () => {
     if (screen?.classList.contains('results-screen')) { show(null); gate(); }
   };
+  // the host chose to play on past the boss: the victory screen closes for both players
+  game.onEndless = () => {
+    if (screen?.classList.contains('results-screen')) { show(null); gate(); }
+  };
   let toast: HTMLElement | null = null;
   game.onConnection = (ok) => {
     toast?.remove();
@@ -125,14 +138,19 @@ async function boot(): Promise<void> {
   startPresence();
   if (isTouch) {
     touchUi = new TouchControls(ui, input, () => input.exitLock());
+    touchUi.haptics = settings.haptics;
+    touchUi.gyroSens = settings.gyroSens;
     setInterval(() => touchUi?.setWeapon(game.weapons.index), 120);
   }
   input.onLockChange = (locked) => {
     touchUi?.setActive(locked && game?.mode === 'play');
+    setAwake(locked && game?.mode === 'play');
     if (!game || game.mode !== 'play' || botMode) return;
     if (locked) {
       clickGate?.remove();
       clickGate = null;
+      touchUi?.setPreview(false);
+      game.held = false;
       game.setPaused(false);
     } else if (!screen && game.phase !== 'over' && game.phase !== 'victory' && !lobbyOpen) {
       game.setPaused(true);
@@ -187,7 +205,7 @@ function mainMenu(error = ''): void {
         <div class="row"><input type="text" id="code" maxlength="4" placeholder="CODE" style="width:118px" /><button id="join" style="flex:1">JOIN CO-OP</button></div>
         <div class="section-label">SYSTEM</div>
         <div class="row"><button id="settings" style="flex:1">SETTINGS</button><button id="controls" style="flex:1">CONTROLS</button></div>
-        ${runsEnabled ? bestLine() : ''}
+        ${runsEnabled ? bestLine() : ''}${classicBestLine()}
         <div class="err" id="err">${esc(error)}</div>
         ${game?.renderer.softwareRendering ? '<div class="err">HARDWARE ACCELERATION IS OFF: the game will run slowly. Turn on "Use graphics acceleration when available" in your browser settings, then restart the browser.</div>' : ''}
       </div>
@@ -225,11 +243,12 @@ function controlsScreen(back: () => void): void {
       <div class="controls">
         ${isTouch ? `
         <div><b>LEFT THUMB</b> move · press anywhere on the left</div><div><b>RIGHT THUMB</b> drag to aim</div>
-        <div><b>FIRE / ALT</b> hold, and drag to aim while shooting</div><div><b>JUMP</b> jump · wall jump ×3</div>
-        <div><b>DASH</b> i-frames, 3 charges</div><div><b>SLIDE</b> slide · in air: ground slam</div>
-        <div><b>PUNCH</b> punch · parry</div><div><b>1 2 3</b> weapons</div>
+        <div><b>TAP</b> the right side to punch · parry</div><div><b>DOUBLE-TAP</b> the left side to dash</div>
+        <div><b>ANY BUTTON</b> hold it and drag: you keep aiming</div><div><b>I II III</b> weapons</div>
+        <div><b>JUMP</b> jump · wall jump ×3</div><div><b>DASH</b> i-frames, 3 charges</div>
+        <div><b>SLIDE</b> slide · in air: ground slam</div><div><b>FIRE / ALT</b> hold to shoot by hand</div>
         <div><b>SLAM → JUMP</b> slam bounce (higher from higher)</div><div><b>SLIDE → JUMP</b> keeps momentum</div>
-        <div><b>AUTO FIRE</b> shoots while your crosshair is on an enemy</div><div><b>AIM ASSIST</b> both can be turned off in Settings</div>` : `
+        <div><b>AUTO FIRE</b> shoots while your crosshair is on an enemy</div><div><b>AIM ASSIST · GYRO AIM</b> all in Settings</div>` : `
         <div><b>WASD</b> move</div><div><b>MOUSE</b> aim</div>
         <div><b>SPACE</b> jump · wall jump ×3</div><div><b>SHIFT</b> dash (i-frames, 3 charges)</div>
         <div><b>C / CTRL</b> slide · in air: ground slam</div><div><b>SLAM → JUMP</b> slam bounce (higher from higher)</div>
@@ -271,6 +290,7 @@ function settingsScreen(back: () => void): void {
   const el = h(`
     <div class="panel">
       <h2>SETTINGS</h2>
+      <div class="settings-grid">
       <div class="setting"><span>${isTouch ? 'LOOK SENSITIVITY' : 'MOUSE SENSITIVITY'}</span><input type="range" id="sens" min="0.1" max="4" step="0.05" value="${s.sensitivity}"><span id="sensv"></span></div>
       <div class="setting"><span>FIELD OF VIEW</span><input type="range" id="fov" min="75" max="125" step="1" value="${s.fov}"><span id="fovv"></span></div>
       <div class="setting"><span>MASTER VOLUME</span><input type="range" id="master" min="0" max="1" step="0.05" value="${s.master}"><span id="masterv"></span></div>
@@ -280,12 +300,21 @@ function settingsScreen(back: () => void): void {
       <div class="setting"><span>RENDER RESOLUTION</span><select id="res">
         ${[[240, '240p · CRUNCHY'], [360, '360p · RETRO'], [480, '480p · SHARP'], [720, '720p'], [0, 'NATIVE']].map(([v, l]) => `<option value="${v}" ${s.resolution === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select><span></span></div>
+      <div class="setting"><span>FRAME RATE</span><select id="cap">
+        ${[[0, 'UNCAPPED'], [60, '60 FPS'], [30, '30 FPS · SAVES BATTERY']].map(([v, l]) => `<option value="${v}" ${s.fpsCap === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select><span></span></div>
+      <div class="setting"><span>AUTO RESOLUTION</span><input type="checkbox" id="autores" ${s.autoRes ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>DITHERING</span><input type="checkbox" id="dither" ${s.dither ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>INVERT Y</span><input type="checkbox" id="inv" ${s.invertY ? 'checked' : ''}><span></span></div>
       <div class="setting"><span>SHOW FPS</span><input type="checkbox" id="fpsbox" ${s.showFps ? 'checked' : ''}><span></span></div>
+      <div class="setting"><span>HINTS DURING PLAY</span><input type="checkbox" id="tips" ${s.tips ? 'checked' : ''}><span></span></div>
       ${isTouch ? `<div class="setting"><span>AUTO FIRE</span><input type="checkbox" id="autofire" ${s.autoFire ? 'checked' : ''}><span></span></div>
-      <div class="setting"><span>AIM ASSIST</span><input type="checkbox" id="assist" ${s.aimAssist ? 'checked' : ''}><span></span></div>` : ''}
-      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>${isTouch ? 'LOW FPS? TRY A LOWER RENDER RESOLUTION.' : 'LOW FPS? TURN ON HARDWARE ACCELERATION IN YOUR BROWSER SETTINGS.'}</div>
+      <div class="setting"><span>AIM ASSIST</span><input type="checkbox" id="assist" ${s.aimAssist ? 'checked' : ''}><span></span></div>
+      <div class="setting"><span>GYRO AIM</span><input type="checkbox" id="gyro" ${s.gyro ? 'checked' : ''}><span></span></div>
+      <div class="setting"><span>GYRO SENSITIVITY</span><input type="range" id="gsens" min="0.3" max="3" step="0.05" value="${s.gyroSens}"><span id="gsensv"></span></div>
+      <div class="setting"><span>VIBRATION</span><input type="checkbox" id="haptics" ${s.haptics ? 'checked' : ''}><span></span></div>` : ''}
+      </div>
+      <div class="hint" style="margin-top:10px;text-align:left">GPU IN USE: <span style="color:${game?.renderer.softwareRendering ? '#ff6b5b' : '#ccc'}">${esc(game?.renderer.gpuName ?? 'unknown')}</span><br>${isTouch ? 'LOW FPS? AUTO RESOLUTION LOWERS THE PICTURE QUALITY TO KEEP THE GAME SMOOTH.' : 'LOW FPS? TURN ON HARDWARE ACCELERATION IN YOUR BROWSER SETTINGS.'}</div>
       <div style="margin-top:14px"><button id="back">BACK</button></div>
     </div>`);
   show(el);
@@ -294,13 +323,16 @@ function settingsScreen(back: () => void): void {
     game.applySettings(settings);
     game.camera.fov = settings.fov;
     game.camera.updateProjectionMatrix();
+    if (touchUi) { touchUi.haptics = settings.haptics; touchUi.gyroSens = settings.gyroSens; }
   };
   const map: [string, keyof Settings, (v: number) => string][] = [
     ['sens', 'sensitivity', (v) => v.toFixed(2)], ['fov', 'fov', (v) => `${v}°`], ['master', 'master', (v) => `${Math.round(v * 100)}%`],
     ['music', 'music', (v) => `${Math.round(v * 100)}%`], ['sfx', 'sfx', (v) => `${Math.round(v * 100)}%`], ['shake', 'shake', (v) => `${Math.round(v * 100)}%`],
+    ['gsens', 'gyroSens', (v) => v.toFixed(2)],
   ];
   for (const [id, key, fmt] of map) {
-    const inp = el.querySelector<HTMLInputElement>(`#${id}`)!;
+    const inp = el.querySelector<HTMLInputElement>(`#${id}`);
+    if (!inp) continue;
     const out = el.querySelector<HTMLElement>(`#${id}v`)!;
     out.textContent = fmt(Number(inp.value));
     inp.addEventListener('input', () => {
@@ -315,6 +347,12 @@ function settingsScreen(back: () => void): void {
   el.querySelector<HTMLInputElement>('#fpsbox')!.addEventListener('change', (e) => { settings.showFps = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector<HTMLInputElement>('#autofire')?.addEventListener('change', (e) => { settings.autoFire = (e.target as HTMLInputElement).checked; apply(); });
   el.querySelector<HTMLInputElement>('#assist')?.addEventListener('change', (e) => { settings.aimAssist = (e.target as HTMLInputElement).checked; apply(); });
+  el.querySelector<HTMLSelectElement>('#cap')!.addEventListener('change', (e) => { settings.fpsCap = Number((e.target as HTMLSelectElement).value); apply(); });
+  el.querySelector<HTMLInputElement>('#autores')!.addEventListener('change', (e) => { settings.autoRes = (e.target as HTMLInputElement).checked; apply(); });
+  el.querySelector<HTMLInputElement>('#tips')!.addEventListener('change', (e) => { settings.tips = (e.target as HTMLInputElement).checked; apply(); });
+  el.querySelector<HTMLInputElement>('#haptics')?.addEventListener('change', (e) => { settings.haptics = (e.target as HTMLInputElement).checked; apply(); });
+  // this tap is the user gesture an iPhone needs before it hands over the motion sensors
+  el.querySelector<HTMLInputElement>('#gyro')?.addEventListener('change', (e) => { settings.gyro = (e.target as HTMLInputElement).checked; touchUi?.setGyro(settings.gyro); apply(); });
   el.querySelector('#back')!.addEventListener('click', () => { blip(); back(); });
   escBack(el, back);
 }
@@ -363,6 +401,7 @@ async function startOnline(mode: 'host' | 'join', code = ''): Promise<void> {
   if (wake) show(h(`<div class="loading">${mode === 'host' ? 'OPENING ROOM' : 'JOINING ' + esc(code.toUpperCase())}…</div>`));
   if (!awake) { mainMenu('Could not reach the co-op server. If you use an ad blocker or a browser VPN, allow onrender.com and try again; otherwise it may still be waking, so try again in a minute. Solo always works.'); return; }
   try {
+    void game.warmPartner(); // fetch the partner's model while the room opens
     res = await ColyseusLink.connect(mode, settings.name || 'SLAYER', code);
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
@@ -437,11 +476,19 @@ function gate(): void {
   if (botMode) return;
   clickGate?.remove();
   clickGate = h(isTouch
-    ? '<div class="click-to-play">TAP TO FIGHT</div><div class="hint">LEFT THUMB moves · RIGHT THUMB aims · hold FIRE and drag to aim while shooting</div>'
+    ? `<div class="click-to-play">TAP TO FIGHT</div>
+       <div class="hint">${settings.autoFire ? 'AUTO-FIRE shoots while your crosshair is on an enemy' : 'hold FIRE and drag to aim while shooting'}</div>
+       <div class="t-tip t-tip-l"><b>LEFT THUMB</b>MOVE<small>DOUBLE-TAP TO DASH</small></div>
+       <div class="t-tip t-tip-r"><b>RIGHT THUMB</b>DRAG TO AIM<small>TAP TO PUNCH · PUNCH <i>YELLOW</i> TO PARRY</small></div>`
     : '<div class="click-to-play">CLICK TO FIGHT</div><div class="hint">WASD · SPACE · SHIFT dash · C slide/slam · F parry · LMB/RMB fire</div>', 'screen');
+  clickGate.classList.add('gate');
   clickGate.style.background = 'rgba(0,0,0,0.35)';
+  // solo: nothing moves until the player has the controls (co-op can't stop the server's clock)
+  game.held = true;
+  touchUi?.setPreview(true);
   clickGate.addEventListener('click', () => {
     audio.resume();
+    if (settings.gyro) touchUi?.setGyro(true);
     // fullscreen lets the keyboard lock swallow Ctrl+W while sliding
     const root = document.documentElement;
     if (!document.fullscreenElement && root.requestFullscreen) {
@@ -490,24 +537,62 @@ function hidePause(): void {
   if (screen && game.mode === 'play' && !lobbyOpen) show(null);
 }
 
+const CLASSIC_BEST_KEY = 'ferrocide.bestClassic.v1';
+/** The furthest Classic has been taken on this device. */
+interface ClassicBest { wave: number; win: boolean; time: number; style: number; rank: string }
+
+function loadClassicBest(): ClassicBest | null {
+  try { return JSON.parse(localStorage.getItem(CLASSIC_BEST_KEY) ?? 'null') as ClassicBest | null; } catch { return null; }
+}
+
+function classicBestText(b: ClassicBest): string {
+  const where = b.wave > CLASSIC_WAVES ? `ENDLESS WAVE ${b.wave}` : b.win ? 'CLEARED' : `WAVE ${b.wave}/${CLASSIC_WAVES}`;
+  return `${where} · ${fmtTime(b.time)} · ${b.rank}`;
+}
+
+function classicBestLine(): string {
+  const b = loadClassicBest();
+  return b ? `<div class="best">BEST · ${esc(classicBestText(b))}</div>` : '';
+}
+
+/** Further is better; at the same point a win beats a loss, then the faster time. */
+function betterClassic(a: ClassicBest, b: ClassicBest | null): boolean {
+  if (!b) return true;
+  if (a.wave !== b.wave) return a.wave > b.wave;
+  if (a.win !== b.win) return a.win;
+  return a.time < b.time;
+}
+
 function showResults(info: GameOverInfo): void {
   hidePause();
   clickGate?.remove();
+  touchUi?.setPreview(false);
   closeForge();
   if (info.mode === 'run') { showRunSummary(info); return; }
   const me = info.stats.find((s) => s.id === info.selfId) ?? info.stats[0];
-  const grade = finalGrade(me?.style ?? 0, info.time, me?.deaths ?? 0, info.win);
-  const mins = Math.floor(info.time / 60), secs = Math.floor(info.time % 60);
+  const grade = finalGrade(me?.style ?? 0, info.time, me?.deaths ?? 0, info.win, info.wave);
+  const past = info.wave > CLASSIC_WAVES; // died somewhere in endless
+  const mine: ClassicBest = { wave: info.wave, win: info.win || past, time: info.time, style: me?.style ?? 0, rank: grade.name };
+  const prev = loadClassicBest();
+  const isBest = !botMode && betterClassic(mine, prev);
+  if (isBest) { try { localStorage.setItem(CLASSIC_BEST_KEY, JSON.stringify(mine)); } catch { /* storage unavailable */ } }
+  const host = game.link?.isHost !== false;
+  const solo = !game.link?.online;
   const rows = info.stats.map((s) => `<tr><td>${esc(s.name)}${s.id === info.selfId ? ' (YOU)' : ''}</td><td>${s.kills}</td><td>${s.damage}</td><td>${s.style}</td><td>${s.parries}</td><td>${s.deaths}</td></tr>`).join('');
+  const title = info.win ? 'THE FOUNDRY FALLS SILENT' : past ? `SLAIN ON WAVE ${info.wave} · ENDLESS` : `SLAIN ON WAVE ${info.wave}/${CLASSIC_WAVES}`;
   const el = h(`
     <div class="panel results">
-      <h2>${info.win ? 'THE FOUNDRY FALLS SILENT' : `SLAIN ON WAVE ${info.wave}/${WAVES.length}`}</h2>
+      <h2>${title}</h2>
       <div class="hint" style="margin:0 auto">FINAL RANK · ${grade.letter}</div>
       <div class="final-rank" style="color:${grade.color}">${grade.name}</div>
-      <div class="hint" style="margin:0 auto">TIME ${mins}:${String(secs).padStart(2, '0')}</div>
+      <div class="hint" style="margin:0 auto">TIME ${fmtTime(info.time)}</div>
+      <div class="best" style="text-align:center">${isBest ? 'NEW BEST' : prev ? `BEST · ${esc(classicBestText(prev))}` : ''}</div>
       <table><tr><th>SLAYER</th><th>KILLS</th><th>DAMAGE</th><th>STYLE</th><th>PARRIES</th><th>DEATHS</th></tr>${rows}</table>
-      <div style="display:flex;gap:8px">
-        ${info.win ? '' : game.link?.isHost !== false ? `<button class="primary" id="retry">RETRY WAVE ${info.wave}</button>` : '<div class="hint" style="align-self:center">WAITING FOR THE HOST TO RETRY…</div>'}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${info.win
+          ? host ? '<button class="primary" id="more">KEEP GOING <small>ENDLESS WAVES</small></button>' : '<div class="hint" style="align-self:center">THE HOST CAN KEEP GOING…</div>'
+          : host ? `<button class="primary" id="retry">RETRY WAVE ${info.wave}</button>` : '<div class="hint" style="align-self:center">WAITING FOR THE HOST TO RETRY…</div>'}
+        ${solo ? '<button id="again">START OVER</button>' : ''}
         <button id="menu">MAIN MENU</button>
       </div>
     </div>`);
@@ -517,9 +602,17 @@ function showResults(info: GameOverInfo): void {
     blip();
     game.link?.retry();
     show(null);
-    void audio.playMusic(info.wave >= WAVES.length ? 'boss' : 'combat1');
+    void audio.playMusic(info.wave === CLASSIC_WAVES ? 'boss' : info.wave >= 5 ? 'combat2' : 'combat1');
     gate();
   });
+  el.querySelector('#more')?.addEventListener('click', () => {
+    blip();
+    game.link?.continueEndless();
+    show(null);
+    void audio.playMusic('combat2');
+    gate();
+  });
+  el.querySelector('#again')?.addEventListener('click', () => { blip(); startSolo('classic'); });
   el.querySelector('#menu')!.addEventListener('click', () => { blip(); game.end(); mainMenu(); });
 }
 
@@ -570,6 +663,8 @@ function showForge(f: ForgeOffers): void {
   hidePause();
   clickGate?.remove();
   clickGate = null;
+  touchUi?.setPreview(false);
+  game.held = false;
   input.exitLock();
   const bank = game.bank;
   const owned = game.ups.map((id) => UPGRADE_BY_ID.get(id)?.name).filter(Boolean).join(' · ') || 'nothing yet';
@@ -640,7 +735,8 @@ function closeForge(): void {
 
 function showRunSummary(info: GameOverInfo): void {
   const me = info.stats.find((s) => s.id === info.selfId) ?? info.stats[0];
-  const grade = finalGrade(me?.style ?? 0, info.time, me?.deaths ?? 0, info.win);
+  // runs are graded on the same scale: how deep you got stands in for the wave reached
+  const grade = finalGrade(me?.style ?? 0, info.time, me?.deaths ?? 0, info.win, Math.max(1, Math.ceil((info.wave / FINAL_DEPTH) * CLASSIC_WAVES)));
   const prev = loadBest();
   const better = !prev || info.win && !prev.win || info.wave > prev.depth || (info.wave === prev.depth && info.time < prev.time);
   if (better) {

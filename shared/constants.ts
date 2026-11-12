@@ -174,13 +174,14 @@ export interface EnemyDef {
 }
 
 export const ENEMIES: Record<EnemyKind, EnemyDef> = {
-  husk: { name: 'HUSK', hp: 55, speed: 10.5, radius: 0.5, height: 1.9, flying: false, headY: 1.62, headR: 0.3, score: 60, heavy: false },
-  eye: { name: 'GAZER', hp: 22, speed: 13, radius: 0.45, height: 0.9, flying: true, headY: 0.45, headR: 0.45, score: 40, heavy: false },
-  warden: { name: 'WARDEN', hp: 160, speed: 6, radius: 0.8, height: 2.3, flying: false, headY: 1.9, headR: 0.45, score: 100, heavy: false },
-  drone: { name: 'SENTRY DRONE', hp: 65, speed: 9, radius: 0.6, height: 1.1, flying: true, headY: 0.55, headR: 0.4, score: 90, heavy: false },
-  brute: { name: 'BRUTE', hp: 900, speed: 5.5, radius: 1.5, height: 4.2, flying: false, headY: 3.5, headR: 0.8, score: 250, heavy: true },
-  colossus: { name: 'THE FOUNDRY COLOSSUS', hp: 4500, speed: 4.2, radius: 2.6, height: 7.4, flying: false, headY: 6.2, headR: 1.3, score: 1500, heavy: true },
-  stalker: { name: 'STALKER', hp: 90, speed: 14, radius: 0.5, height: 2.1, flying: false, headY: 1.82, headR: 0.3, score: 110, heavy: false },
+  // kill score tracks threat (hp x how dangerous it is to fight), so fodder is cheap and heavies pay
+  husk: { name: 'HUSK', hp: 55, speed: 10.5, radius: 0.5, height: 1.9, flying: false, headY: 1.62, headR: 0.3, score: 25, heavy: false },
+  eye: { name: 'GAZER', hp: 22, speed: 13, radius: 0.45, height: 0.9, flying: true, headY: 0.45, headR: 0.45, score: 18, heavy: false },
+  warden: { name: 'WARDEN', hp: 160, speed: 6, radius: 0.8, height: 2.3, flying: false, headY: 1.9, headR: 0.45, score: 90, heavy: false },
+  drone: { name: 'SENTRY DRONE', hp: 65, speed: 9, radius: 0.6, height: 1.1, flying: true, headY: 0.55, headR: 0.4, score: 65, heavy: false },
+  brute: { name: 'BRUTE', hp: 900, speed: 5.5, radius: 1.5, height: 4.2, flying: false, headY: 3.5, headR: 0.8, score: 450, heavy: true },
+  colossus: { name: 'THE FOUNDRY COLOSSUS', hp: 4500, speed: 4.2, radius: 2.6, height: 7.4, flying: false, headY: 6.2, headR: 1.3, score: 2500, heavy: true },
+  stalker: { name: 'STALKER', hp: 90, speed: 14, radius: 0.5, height: 2.1, flying: false, headY: 1.82, headR: 0.3, score: 100, heavy: false },
 };
 
 export const ENEMY_ATTACKS = {
@@ -189,8 +190,28 @@ export const ENEMY_ATTACKS = {
   warden: { windup: 0.7, cooldown: 2.4, orbSpeed: 17, orbDamage: 22, preferredMin: 13, preferredMax: 26 },
   drone: { windup: 0.55, cooldown: 2.0, burst: 3, burstGap: 0.14, boltSpeed: 46, boltDamage: 9, lead: 0.6 },
   brute: { stompWindup: 0.9, stompDamage: 26, waveSpeed: 17, waveRange: 26, mortarWindup: 0.8, mortarDamage: 30, mortarRadius: 4.5, cooldown: 2.6, meleeRange: 4.2, meleeDamage: 35 },
-  stalker: { range: 2.4, windup: 0.32, damage: 16, blinkEvery: 3.4, blinkDist: 3.5 },
+  // blinks in close behind its target and lunges as the slash lands: stand still and it connects,
+  // dash or run off during the telegraph and it whiffs
+  stalker: { range: 2.4, windup: 0.32, damage: 16, blinkEvery: 3.4, blinkDist: 2.2, blinkSide: 1.2, lunge: 12, lungeTime: 0.14 },
   colossus: { beamWindup: 1.3, beamTime: 2.2, beamDps: 70, beamSweep: 1.4, summonEvery: 14, ringOrbs: 14, ringSpeed: 13 },
+};
+
+/** Pacing rules that sit on top of the wave lists. */
+export const WAVE_RULES = {
+  clearHeal: 25, // hp every living player gets between waves (hard damage is cleared too)
+  // mop-up: with nothing left to spawn and only a few enemies alive, stragglers come to the player
+  mopCount: 3,
+  mopAfter: 8, // seconds of "only stragglers left" before the hunt starts
+  mopSpeed: 1.25,
+  mopForce: 25, // this long into the hunt, any survivor is teleported next to the player
+  mopForceEvery: 4, // and again at this interval while it stays far or out of sight
+  mopFar: 16,
+  // navigation: a ground enemy that makes little progress while wishing to move sidesteps or hops
+  stuckWindow: 0.5,
+  stuckProgress: 0.2, // share of the expected distance per window below which it counts as stuck
+  stuckAfter: 1.0,
+  highGround: 2.4, // a player above this height counts as camping
+  highAfter: 3, // seconds before melee enemies start leaping up more readily
 };
 
 export type ProjectileKind = 'orb' | 'bolt' | 'mortar' | 'reflected';

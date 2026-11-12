@@ -8,7 +8,7 @@ import { angleDiff } from '../../../shared/math';
 import { PF, type GameEvent, type GameMode, type HitKind, type Phase, type PlayerStats, type RunSnap, type Snapshot, type V } from '../../../shared/protocol';
 import { CHALLENGE_INFO, FINAL_DEPTH, GATE_SPOTS, REWARD_INFO, RUN, layerOf, roomOf } from '../../../shared/run';
 import { UPGRADE_BY_ID } from '../../../shared/upgrades';
-import { WAVES } from '../../../shared/waves';
+import { CLASSIC_WAVES, WAVES } from '../../../shared/waves';
 import { sprite } from '../engine/assets';
 import type { Audio } from '../engine/audio';
 import type { Input } from '../engine/input';
@@ -21,9 +21,10 @@ import { COLORS, FX } from './fx';
 import { Gates } from './gates';
 import { Hazards, type PlayerProbe } from './hazards';
 import { HUD } from './hud';
-import { RemotePlayer } from './remote';
+import { RemotePlayer, warmPartner } from './remote';
 import { SnapBuffer } from './snapbuf';
 import { StyleMeter } from './style';
+import { Tips } from './tips';
 import { Weapons, type WeaponCtx } from './weapons';
 import { World } from './world';
 
@@ -35,6 +36,8 @@ export interface GameOverInfo {
   selfId: string;
   mode: GameMode;
   ups: Record<string, string[]>;
+  /** Classic: the run went on past the boss. */
+  endless: boolean;
 }
 
 /** The forge offers this player is looking at. */
@@ -67,11 +70,29 @@ export class Game {
   alive = true;
   phase: Phase = 'lobby';
   wave = 0;
+  /** Classic: playing on past the boss, waves without end. */
+  endless = false;
+  private waveTitle = '';
+  onEndless: (() => void) | null = null;
   waveLeft = 0;
   phaseTimer = 0;
   private time = 0;
   private autoFireT = 0;
   private assistTmp = new THREE.Vector3();
+  private assistAt = new THREE.Vector3();
+  private assistC = new THREE.Vector3();
+  private assistId = -1; // the enemy aim assist is holding on to
+  private assistNear = 0; // 0..1: how squarely the crosshair sits on it (slows the look drag)
+  private lookSpeed = 0; // rad/s the player is turning by hand
+  /** Solo: the world waits behind the click/tap-to-play screen until the player is in control. */
+  held = false;
+  private frameEma = 1 / 60;
+  private slowT = 0;
+  private goodT = 0;
+  private upWait = 20; // seconds of smooth frames before trying a higher resolution again
+  private tips = new Tips((t) => this.hud.tip(t));
+  private sameGunKills = 0;
+  private lastKillGun = '';
   private acc = 0;
   private sendAcc = 0;
   private eyeH: number = PLAYER.eyeHeight;
@@ -145,7 +166,7 @@ export class Game {
 
   /**
    * Loading screen: draw one of everything once (every enemy kind, hazard, effect, viewmodel,
-   * projectile, the partner model and the run gates) so shaders compile and GPU buffers upload
+   * projectile and the run gates) so shaders compile and GPU buffers upload
    * now. Otherwise the first appearance of each enemy type froze the game for 20-150 ms.
    */
   warmup(): void {
@@ -154,8 +175,6 @@ export class Game {
     this.hazards.warm({ x: 0, y: 4, z: 3 });
     this.weapons.warm(new THREE.Vector3(1.5, 3, 3));
     this.gates.warm(true);
-    const partner = new RemotePlayer('warm', 'WARM', this.world.scene, sprite('light_01'));
-    partner.inst.root.position.set(-3, 1.2, 4);
     const p = { x: 2, y: 2.5, z: 3 };
     this.fx.gibBurst(p, 6, 4, 0.2, 'flesh');
     this.fx.gibBurst(p, 6, 4, 0.2, 'metal');
@@ -177,7 +196,6 @@ export class Game {
     this.camera.lookAt(0, 2, 0);
     this.camera.updateMatrixWorld();
     for (let i = 0; i < 2; i++) this.renderer.render(this.world.scene, this.camera, this.weapons.vmScene, this.weapons.vmCam);
-    partner.dispose();
     this.enemies.clear();
     this.hazards.clear();
     this.weapons.warm(null);
@@ -188,6 +206,11 @@ export class Game {
     this.enemies.prefill({ husk: 10, eye: 6, drone: 4, warden: 4, stalker: 4, brute: 2, colossus: 1 });
   }
 
+  /** Co-op only: fetch the partner's model and compile its shader while the room is being set up. */
+  warmPartner(): Promise<void> {
+    return warmPartner(this.renderer.gl, this.world.scene, this.camera);
+  }
+
   get selfId(): string {
     return this.link?.id ?? '';
   }
@@ -195,6 +218,8 @@ export class Game {
   applySettings(s: Settings): void {
     this.settings = s;
     this.renderer.internalHeight = s.resolution;
+    if (!s.autoRes) this.renderer.scale = 1;
+    this.tips.enabled = s.tips;
     this.renderer.post.dither = s.dither;
     this.fx.shakeScale = s.shake;
     this.audio.setVolumes(s.master, s.music, s.sfx);
@@ -206,8 +231,7 @@ export class Game {
     this.camera.aspect = this.renderer.aspect;
     this.camera.updateProjectionMatrix();
     this.weapons.resize(this.renderer.aspect);
-    const h = this.settings.resolution > 0 ? Math.min(this.settings.resolution, window.innerHeight) : window.innerHeight;
-    this.fx.setParticleScale(h, this.camera.fov);
+    this.fx.setParticleScale(this.renderer.targetHeight, this.camera.fov);
   }
 
   startLoop(): void {
@@ -216,14 +240,49 @@ export class Game {
     this.lastRaf = performance.now();
     const frame = (t: number) => {
       if (!this.running) return;
+      // frame cap: on a 120 Hz phone every other refresh is skipped, which halves the heat
+      const cap = this.settings.fpsCap;
+      if (cap > 0 && t - this.lastRaf < 1000 / cap - 1.5) { requestAnimationFrame(frame); return; }
       // the first callback's timestamp can predate lastRaf (it marks the frame's start): never step backwards
-      const dt = Math.max(0, Math.min(0.05, (t - this.lastRaf) / 1000));
+      const raw = (t - this.lastRaf) / 1000;
+      const dt = Math.max(0, Math.min(0.05, raw));
       this.lastRaf = t;
       this.fps = this.fps * 0.95 + (dt > 0 ? 1 / dt : 60) * 0.05;
       this.frame(dt);
+      this.adaptResolution(raw);
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
+  }
+
+  /**
+   * Auto resolution: when frames keep arriving late, render fewer pixels; when they have been
+   * smooth for a while, try more again. Each failed step up doubles the wait before the next
+   * try, so a phone that can't hold the higher resolution settles instead of flapping.
+   */
+  private adaptResolution(dt: number): void {
+    const r = this.renderer;
+    if (!this.settings.autoRes || this.mode !== 'play' || this.paused || this.held || dt <= 0 || dt > 0.25) return;
+    this.frameEma += (dt - this.frameEma) * 0.1;
+    const target = 1 / (this.settings.fpsCap > 0 ? this.settings.fpsCap : 60);
+    if (this.frameEma > target * 1.6) {
+      this.slowT += dt;
+      this.goodT = 0;
+    } else {
+      this.slowT = Math.max(0, this.slowT - dt);
+      if (this.frameEma < target * 1.35) this.goodT += dt;
+    }
+    let scale = r.scale;
+    if (this.slowT > 2 && scale > 0.5) {
+      scale = Math.max(0.5, scale - 0.17);
+      this.upWait = Math.min(160, this.upWait * 2);
+    } else if (this.goodT > this.upWait && scale < 1) {
+      scale = Math.min(1, scale + 0.17);
+    } else return;
+    this.slowT = this.goodT = 0;
+    this.frameEma = target;
+    r.scale = scale;
+    this.resize();
   }
 
   // ------------------------------------------------------------------ sessions
@@ -233,6 +292,7 @@ export class Game {
     this.link = link;
     this.mode = 'play';
     this.paused = false;
+    this.held = false;
     for (const p of players) this.names.set(p.id, p.name);
     link.handlers.snap = (s) => this.onSnap(s);
     link.handlers.events = (e) => this.onEvents(e);
@@ -255,6 +315,8 @@ export class Game {
     this.style.reset();
     this.style.total = 0;
     this.gameMode = 'classic';
+    this.endless = false;
+    this.waveTitle = '';
     this.run = null;
     this.bank = 0;
     this.forge = null;
@@ -272,6 +334,7 @@ export class Game {
     if (this.link) this.link.leave();
     this.link = null;
     this.mode = 'menu';
+    this.held = false;
     this.snaps.clear();
     this.enemies.clear();
     this.hazards.clear();
@@ -320,6 +383,7 @@ export class Game {
       this.onPhase?.(s.phase);
     }
     this.wave = s.wave;
+    this.endless = !!s.endless;
     this.waveLeft = s.left;
     this.phaseTimer = s.timer;
     this.gameMode = s.mode ?? 'classic';
@@ -496,15 +560,23 @@ export class Game {
           } else this.hud.kill(`${this.names.get(e.pid) ?? 'PARTNER'} FORGED ${UPGRADE_BY_ID.get(e.id)?.name ?? ''}`);
           break;
         case 'wave': {
+          this.waveTitle = e.title;
           this.hud.showBanner(e.boss ? 'WARNING' : `WAVE ${e.n}`, e.title, 2.6);
           this.audio.play('door', { volume: 0.35, pitch: 0.6, dur: 0.6 });
           if (e.boss) void this.audio.playMusic('boss');
-          else if (e.n === 1 || e.n === 5) void this.audio.playMusic(e.n >= 5 ? 'combat2' : 'combat1');
+          // endless: back to the fight music after each boss
+          else if (e.n === 1 || e.n === 5 || (e.n > CLASSIC_WAVES && (e.n - 1) % 8 === 0)) void this.audio.playMusic(e.n >= 5 ? 'combat2' : 'combat1');
           break;
         }
+        case 'endless':
+          this.endless = true;
+          this.hud.showBanner('ENDLESS', 'HOW FAR CAN YOU GO', 2.6);
+          this.onEndless?.();
+          break;
         case 'clear':
           if (this.gameMode === 'run') this.hud.showBanner('ROOM CLEARED', e.n < FINAL_DEPTH ? '' : 'THE CORE IS SILENT', 2.2);
-          else this.hud.showBanner('WAVE CLEARED', e.n < WAVES.length ? 'BREATHE' : '', 2.2);
+          else this.hud.showBanner('WAVE CLEARED', e.n !== CLASSIC_WAVES ? 'BREATHE' : '', 2.2);
+          this.waveTitle = ''; // the next wave names itself when it starts
           this.style.total += 150;
           this.audio.synth('rankup', 0.8);
           break;
@@ -516,7 +588,7 @@ export class Game {
           break;
         case 'over':
           this.input.exitLock();
-          this.onGameOver?.({ win: e.win, wave: e.wave, time: e.time, stats: e.stats, selfId: me, mode: e.mode ?? 'classic', ups: e.ups ?? {} });
+          this.onGameOver?.({ win: e.win, wave: e.wave, time: e.time, stats: e.stats, selfId: me, mode: e.mode ?? 'classic', ups: e.ups ?? {}, endless: !!e.endless });
           void this.audio.playMusic('menu');
           break;
         case 'reset':
@@ -533,7 +605,7 @@ export class Game {
             break;
           }
           this.hud.showBanner('RETRY', `WAVE ${e.wave}`, 2);
-          void this.audio.playMusic(e.wave >= WAVES.length ? 'boss' : e.wave >= 5 ? 'combat2' : 'combat1');
+          void this.audio.playMusic(e.wave === CLASSIC_WAVES ? 'boss' : e.wave >= 5 ? 'combat2' : 'combat1');
           break;
         case 'join':
           this.names.set(e.pid, e.name);
@@ -564,6 +636,8 @@ export class Game {
     this.hurtFlash = Math.min(1, this.hurtFlash + 0.35 + d / 60);
     this.fx.shake(Math.min(0.6, 0.2 + d / 60));
     this.style.hurt(d);
+    this.buzz(d >= 20 ? 45 : 25);
+    this.tips.offer('dash', 'DASH THROUGH ATTACKS: NOTHING CAN HIT YOU MID-DASH');
     this.audio.play('flesh', { volume: 0.8, pitch: 0.8 });
     this.audio.play('armor', { volume: 0.5, pitch: 0.6 });
   }
@@ -600,6 +674,7 @@ export class Game {
     this.fx.glow(p, 3.5, COLORS.parry, 0.25);
     this.fx.sparks(p, 30, 14, COLORS.parry, 0.15);
     this.audio.play('parry', { volume: 1.1 });
+    this.buzz([12, 40, 24]);
     this.audio.duck(0.2, 0.35);
     this.fx.shake(0.4);
     this.flashAmt = 0.45;
@@ -645,6 +720,9 @@ export class Game {
     // credit the weapon that actually did it (rockets/cores/coins can land after a swap)
     const weapon = weaponOf(how) ?? (v as EnemyView & { lastWeapon?: string }).lastWeapon;
     s.add(v.def.heavy ? `${v.def.name} SLAIN` : 'KILL', v.def.score, v.def.heavy, weapon);
+    this.sameGunKills = weapon && weapon === this.lastKillGun ? this.sameGunKills + 1 : 0;
+    this.lastKillGun = weapon ?? '';
+    if (this.sameGunKills >= 7) this.tips.offer('fresh', 'SWITCH GUNS: A FRESH WEAPON SCORES MORE');
     if (head) s.add('HEADSHOT', 35);
     if (!this.motor.grounded) s.add('AIRBORNE', 40);
     if (Math.hypot(this.motor.vel.x, this.motor.vel.z) > 23) s.add('SPEEDKILL', 30);
@@ -750,7 +828,7 @@ export class Game {
     // click), because browsers refuse pointer lock from an Esc press and the game would otherwise
     // run on with a dead mouse.
     if (this.input.pausePressed() && !this.bot && !this.paused) { this.setPaused(true); this.input.exitLock(); }
-    const soloPaused = this.paused && !link.online;
+    const soloPaused = (this.paused || this.held) && !link.online;
     // hitstop slows the world (and freezes its view), never the network
     let worldDt = dt;
     if (this.fx.hitstop > 0) {
@@ -782,11 +860,17 @@ export class Game {
       this.yaw = aim.yaw;
       this.pitch = aim.pitch;
     } else if (!this.paused) {
-      this.yaw -= mouse[0] * sens;
-      this.pitch -= mouse[1] * sens * (this.settings.invertY ? -1 : 1);
-      this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch));
+      // touch: the drag slows a little while the crosshair is on an enemy, so it's easy to stay there
+      const grip = this.input.touch && this.settings.aimAssist ? 1 - 0.42 * this.assistNear : 1;
+      const gyro = this.input.consumeAngles();
+      const dyaw = -mouse[0] * sens * grip + gyro[0];
+      const dpitch = -mouse[1] * sens * grip * (this.settings.invertY ? -1 : 1) + gyro[1];
+      this.yaw += dyaw;
+      this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch + dpitch));
+      if (dt > 0) this.lookSpeed += (Math.hypot(dyaw, dpitch) / dt - this.lookSpeed) * Math.min(1, dt * 12);
     }
     this.touchAssist(dt);
+    this.offerTips(dt);
 
     // move: fixed 120 Hz substeps; latched presses are handed to the first substep that runs
     const canMove = this.alive && !this.paused && this.phase !== 'over' && this.phase !== 'victory';
@@ -852,7 +936,7 @@ export class Game {
       r.update(worldDt, snap ? Math.hypot(snap[4], snap[6]) : 0);
     }
     this.fx.update(worldDt);
-    this.world.update(worldDt, this.time);
+    this.world.update(worldDt, this.time, this.camera.position);
     this.world.meowshi.update(worldDt, this.time, this.camera.position, this.alive && !this.paused ? this.audio : null);
     this.gates.update(worldDt);
     this.style.update(worldDt, this.phase === 'combat');
@@ -902,8 +986,8 @@ export class Game {
       hp: this.hp, hard: this.hard, stamina: this.motor.stamina, weapon: this.weapons.current, alt: this.weapons.altLabel(),
       variant: this.weapons.current === 'shotgun' && this.weapons.hammer ? `JACKHAMMER · ${vname}` : vname,
       impact: this.weapons.current === 'shotgun' && this.weapons.hammer ? this.weapons.impactTier : -1,
-      style: this.style, wave: this.wave, waves: WAVES.length,
-      title: WAVES[this.wave - 1]?.title ?? '', left: this.waveLeft, phase: this.phase,
+      style: this.style, wave: this.wave, waves: CLASSIC_WAVES, endless: this.endless,
+      title: WAVES[this.wave - 1]?.title ?? this.waveTitle, left: this.waveLeft, phase: this.phase,
       timer: this.phaseTimer, boss: this.bossInfo(), ping: link.ping, online: link.online,
       run: this.gameMode === 'run' ? this.run : null, bank: this.bank,
     });
@@ -999,50 +1083,95 @@ export class Game {
   /**
    * Touch only. Thumbs can't aim like a mouse, so two optional helpers (both in Settings):
    * aim assist eases the crosshair toward an enemy that is already close to it, and auto-fire
-   * holds the trigger while the crosshair is actually on one. Hits are still real hitscans.
+   * holds the trigger while the crosshair is on one. Hits are still real hitscans.
    */
   private touchAssist(dt: number): void {
     const inp = this.input;
     inp.autoFire = false;
-    if (!inp.touch || this.bot || !this.alive || this.paused || !inp.locked) return;
     const s = this.settings;
-    if (!s.autoFire && !s.aimAssist) return;
+    if (!inp.touch || this.bot || !this.alive || this.paused || !inp.locked || (!s.autoFire && !s.aimAssist)) {
+      this.assistNear = 0;
+      this.assistId = -1;
+      return;
+    }
     const eye = this.eyePos();
-    if (s.aimAssist) {
-      const cp = Math.cos(this.pitch);
-      const fx = -Math.sin(this.yaw) * cp, fy = Math.sin(this.pitch), fz = -Math.cos(this.yaw) * cp;
-      const CONE = 0.17; // ~10 degrees
-      let best: THREE.Vector3 | null = null, bestAng = CONE;
-      for (const v of this.enemies.views.values()) {
-        if (v.dead || v.spawnT > 0.5) continue;
-        const c = v.centre(this.assistTmp);
-        const dx = c.x - eye.x, dy = c.y - eye.y, dz = c.z - eye.z;
-        const d = Math.hypot(dx, dy, dz);
-        if (d < 1.5 || d > 70) continue;
-        const ang = Math.acos(Math.max(-1, Math.min(1, (dx * fx + dy * fy + dz * fz) / d)));
-        if (ang < bestAng) { bestAng = ang; best = (best ?? new THREE.Vector3()).copy(c); }
-      }
-      if (best && lineOfSight(eye, best)) {
-        const dx = best.x - eye.x, dy = best.y - eye.y, dz = best.z - eye.z;
-        const wantYaw = Math.atan2(-dx, -dz), wantPitch = Math.atan2(dy, Math.hypot(dx, dz));
-        // a soft pull, strongest in the middle of the cone: easy to drag away from
-        const k = (1 - Math.exp(-dt * 4.5)) * (1 - bestAng / CONE * 0.5);
-        this.yaw += angleDiff(this.yaw, wantYaw) * k;
-        this.pitch += (wantPitch - this.pitch) * k;
-      }
+    const cp = Math.cos(this.pitch);
+    const fx = -Math.sin(this.yaw) * cp, fy = Math.sin(this.pitch), fz = -Math.cos(this.yaw) * cp;
+    const CONE = 0.24; // ~14 degrees: where the pull starts
+    const INNER = 0.05; // ~3 degrees: close enough to call it "on target"
+    // the nearest enemy to the crosshair, but hold on to the current one unless another is
+    // clearly closer: two enemies side by side must not make the view flip between them
+    let bestId = -1, bestAng = CONE, bestDist = 0, heldAng = -1, heldDist = 0;
+    const best = this.assistAt, held = this.assistTmp;
+    for (const [id, v] of this.enemies.views) {
+      if (v.dead || v.spawnT > 0.5) continue;
+      const c = v.centre(this.assistC);
+      const dx = c.x - eye.x, dy = c.y - eye.y, dz = c.z - eye.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < 1.5 || d > 70) continue;
+      const ang = Math.acos(Math.max(-1, Math.min(1, (dx * fx + dy * fy + dz * fz) / d)));
+      if (id === this.assistId && ang < CONE * 1.25) { heldAng = ang; heldDist = d; held.copy(c); }
+      if (ang < bestAng) { bestAng = ang; bestId = id; bestDist = d; best.copy(c); }
+    }
+    if (heldAng >= 0 && bestId !== this.assistId && heldAng < bestAng * 1.6 + 0.02) {
+      bestId = this.assistId;
+      bestAng = heldAng;
+      bestDist = heldDist;
+      best.copy(held);
+    }
+    const seen = bestId >= 0 && lineOfSight(eye, best);
+    this.assistId = seen ? bestId : -1;
+    const near = seen && bestAng < INNER * 1.6 ? 1 : 0;
+    this.assistNear += (near - this.assistNear) * Math.min(1, dt * 10);
+    if (s.aimAssist && seen) {
+      const dx = best.x - eye.x, dy = best.y - eye.y, dz = best.z - eye.z;
+      const wantYaw = Math.atan2(-dx, -dz), wantPitch = Math.atan2(dy, Math.hypot(dx, dz));
+      // A gentle pull across the cone and a firm one once nearly on target. A fast drag is the
+      // player choosing to look elsewhere, so the pull lets go.
+      const letGo = Math.max(0, Math.min(1, (this.lookSpeed - 1.2) / 2.5));
+      const rate = (bestAng < INNER ? 11 : 3.2 + 3.5 * (1 - bestAng / CONE)) * (1 - 0.85 * letGo);
+      const k = 1 - Math.exp(-dt * rate);
+      this.yaw += angleDiff(this.yaw, wantYaw) * k;
+      this.pitch += (wantPitch - this.pitch) * k;
     }
     if (s.autoFire) {
-      const cp = Math.cos(this.pitch);
-      const fwd = { x: -Math.sin(this.yaw) * cp, y: Math.sin(this.pitch), z: -Math.cos(this.yaw) * cp };
+      const fwd = { x: fx, y: fy, z: fz };
       const w = this.weapons.current;
       const range = w === 'shotgun' ? 15 : w === 'launcher' ? 60 : 90;
       const wall = raycastWorld(eye, fwd, range);
       const hit = this.enemies.raycast(eye, fwd, wall ? wall.dist : range)[0];
+      // a spread or a blast doesn't need the exact centre: nearly on target is enough
+      const loose = w === 'revolver' ? 0 : w === 'shotgun' ? 0.07 : 0.04;
+      const dist = hit ? hit.dist : seen && bestAng < loose && bestDist < range ? bestDist : -1;
       // rockets wait until the target is far enough not to catch you in the blast
-      if (hit && !(w === 'launcher' && hit.dist < 7)) this.autoFireT = 0.12;
+      if (dist >= 0 && !(w === 'launcher' && dist < 7)) this.autoFireT = 0.12;
       this.autoFireT = Math.max(0, this.autoFireT - dt);
       inp.autoFire = this.autoFireT > 0;
     }
+  }
+
+  /** First-time hints, each offered at the moment it is useful. */
+  private offerTips(dt: number): void {
+    const t = this.tips;
+    t.update(dt);
+    if (this.bot || !this.alive || this.paused || this.held || this.phase !== 'combat') return;
+    const touch = this.input.touch;
+    if (this.hazards.parryCandidates(this.tmpEye, this.fwd, 18, 0.4).length) {
+      t.offer('parry', touch ? 'YELLOW SHOT INCOMING: TAP THE RIGHT SIDE TO PUNCH IT BACK' : 'YELLOW SHOT INCOMING: PRESS F TO PUNCH IT BACK');
+    }
+    if (this.hp < 55) t.offer('blood', 'BLOOD IS FUEL: HURT ENEMIES UP CLOSE TO HEAL');
+    if (this.gameMode !== 'classic') return;
+    if (this.wave >= 2 && this.weapons.current === 'revolver') {
+      t.offer('coin', touch ? 'ALT TOSSES A COIN: SHOOT IT AND THE SHOT FINDS A HEAD' : 'RIGHT CLICK TOSSES A COIN: SHOOT IT AND THE SHOT FINDS A HEAD');
+    }
+    if (this.wave >= 3 && !this.motor.grounded) {
+      t.offer('slam', touch ? 'SLIDE IN THE AIR TO SLAM DOWN. JUMP AS YOU LAND TO BOUNCE' : 'CTRL IN THE AIR SLAMS DOWN. JUMP AS YOU LAND TO BOUNCE');
+    }
+  }
+
+  /** A short buzz on phones that can (Android). */
+  private buzz(pattern: number | number[]): void {
+    if (this.input.touch && this.settings.haptics && !this.bot) navigator.vibrate?.(pattern);
   }
 
   private eyePos(): THREE.Vector3 {

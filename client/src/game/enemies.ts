@@ -81,6 +81,9 @@ const VOICE: Record<EnemyKind, number> = { husk: 1, eye: 1.8, warden: 1, drone: 
 const hornGeo = new THREE.ConeGeometry(0.5, 1, 4);
 const hornMat = new THREE.MeshLambertMaterial({ color: 0x1a1614, emissive: 0x120200 });
 
+/** Humanoids farther than this (metres) from the camera animate at half rate. */
+const LOD_DIST = 18;
+
 const PARRYABLE_ATTACKS = new Set(['orb', 'mortar']);
 /** Elite aura colours: armoured, swift, volatile. */
 export const ELITE_COLORS = [0x7fa8ff, 0x9dff5a, 0xff7a1a];
@@ -115,6 +118,8 @@ export class EnemyView {
   headBone: THREE.Object3D | null = null;
   headWorld = new THREE.Vector3();
   headValid = false;
+  lodDt = 0; // animation time owed while this view's mixer sat out a frame
+  trackPos = new THREE.Vector3(); // where the root was when the head was last read from the rig
   horns = new THREE.Group();
   readonly skin: Skin;
   readonly def;
@@ -167,6 +172,7 @@ export class EnemyView {
     this.glow.scale.setScalar(this.def.heavy ? 3 : 1.6);
     this.inst.root.add(this.glow);
     this.glow.position.y = this.def.flying ? 0 : this.def.headY;
+    this.glow.visible = false; // drawn only while a telegraph lights it
     this.baseEmissive = this.inst.materials.map((m) => (m as THREE.MeshLambertMaterial).emissive?.clone() ?? null);
     this.baseInner.copy(this.inst.inner.scale);
     this.play('spawn');
@@ -198,6 +204,7 @@ export class EnemyView {
     this.lockAnim = 0;
     this.spawnT = 0;
     this.headValid = false;
+    this.lodDt = 0;
     if (this.aura) {
       this.inst.root.remove(this.aura);
       (this.aura.material as THREE.Material).dispose();
@@ -209,6 +216,7 @@ export class EnemyView {
     this.inst.root.visible = this.eyes.visible = this.horns.visible = true;
     this.inst.root.scale.setScalar(1);
     (this.glow.material as THREE.SpriteMaterial).opacity = 0;
+    this.glow.visible = false;
     this.inst.flash.value = 0;
     const tags = this as unknown as { lastHead?: boolean; lastWeapon?: string };
     delete tags.lastHead;
@@ -497,9 +505,34 @@ export class Enemies {
     return v.effectiveHp <= 0;
   }
 
-  update(dt: number, now: number): void {
+  /** Counts frames so far-away rigs can take turns animating. */
+  private frame = 0;
+  private camFwd = new THREE.Vector3();
+
+  /**
+   * Cheap animation LOD: a 65-bone humanoid that is far from the camera or behind it only advances its
+   * mixer every other frame (with the time it owes), unless it is telegraphing, attacking, stunned,
+   * spawning or dying, where timing matters.
+   */
+  private lodIdle(v: EnemyView, cam: THREE.Camera | undefined): boolean {
+    if (!cam || !v.skin.humanoid || v.dead || v.spawnT > 0 || v.telegraphT > 0 || v.lockAnim > 0 || v.flashT > 0) return false;
+    if (v.state === 'attack' || v.state === 'windup' || v.state === 'beam' || v.state === 'dive' || v.state === 'stun' || v.state === 'spawn') return false;
+    const dx = v.pos.x - cam.position.x, dy = v.pos.y - cam.position.y, dz = v.pos.z - cam.position.z;
+    if (dx * dx + dy * dy + dz * dz > LOD_DIST * LOD_DIST) return true;
+    return dx * this.camFwd.x + dy * this.camFwd.y + dz * this.camFwd.z < 0;
+  }
+
+  update(dt: number, now: number, cam?: THREE.Camera): void {
+    this.frame++;
+    if (cam) cam.getWorldDirection(this.camFwd);
     for (const v of this.views.values()) {
-      v.inst.mixer?.update(dt);
+      // far / off-screen rigs animate on alternate frames, passing the accumulated time so speed is unchanged
+      const coast = this.lodIdle(v, cam) && ((this.frame + v.id) & 1) === 1;
+      if (coast) v.lodDt += dt;
+      else {
+        v.inst.mixer?.update(dt + v.lodDt);
+        v.lodDt = 0;
+      }
       v.lockAnim = Math.max(0, v.lockAnim - dt);
       if (v.lockAnim === 0 && v.anim && !v.dead && v.anim.getClip() && !v.anim.isRunning() && v.state !== 'stun') {
         this.onState(v, v.state === 'windup' ? 'move' : v.state);
@@ -516,10 +549,15 @@ export class Enemies {
       if (v.def.flying) v.inst.root.position.y += Math.sin(now * 3 + v.id) * 0.08;
       v.inst.root.rotation.y = v.yaw + Math.PI;
       // track eyes + horns to the animated head
-      if (v.headBone) {
+      if (v.headBone && coast && v.headValid) {
+        // rig not re-posed this frame: carry the head along with the root instead of re-reading the bones
+        v.headWorld.x += v.pos.x - v.trackPos.x; v.headWorld.y += v.pos.y - v.trackPos.y; v.headWorld.z += v.pos.z - v.trackPos.z;
+        v.trackPos.copy(v.pos);
+      } else if (v.headBone) {
         v.inst.root.updateMatrixWorld(true);
         v.headBone.getWorldPosition(v.headWorld);
         v.headValid = true;
+        v.trackPos.copy(v.pos);
         if (v.skin.humanoid) {
           // the rig's head bone sits at the base of the skull: shift up its own axis to the skull's
           // centre so headshots, eyes and horns all line up with the visible head
@@ -566,6 +604,7 @@ export class Enemies {
         v.glow.scale.setScalar((v.def.heavy ? 3 : 1.6) * (0.6 + k * 0.8));
         if (k > 0.75) flash = Math.max(flash, 0.35 * ((k - 0.75) * 4));
       } else mat.opacity = Math.max(0, mat.opacity - dt * 6);
+      v.glow.visible = mat.opacity > 0.01; // an invisible sprite costs a draw call; hiding it doesn't change shaders
       v.inst.flash.value = flash;
     }
   }

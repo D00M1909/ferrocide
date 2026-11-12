@@ -4,8 +4,15 @@ import * as THREE from 'three';
 import { raycastWorld } from '../../../shared/arena';
 import type { Vec3 } from '../../../shared/math';
 import { sprite, type SpriteName } from '../engine/assets';
+import { lowSpec } from '../platform';
 
 const tmpV = new THREE.Vector3();
+const ZERO: Vec3 = { x: 0, y: 0, z: 0 };
+
+/** Phones: big bursts emit about half as many particles (they are overdraw-bound there). */
+const cut = (n: number): number => (lowSpec ? Math.max(1, Math.round(n * 0.55)) : n);
+
+const DECAL_CAP = 160;
 
 class ParticleSystem {
   readonly points: THREE.Points;
@@ -23,6 +30,8 @@ class ParticleSystem {
   private drag: Float32Array;
   private geo: THREE.BufferGeometry;
   static scale = { value: 400 };
+  /** Largest point sprite in render-target pixels; stops near-camera puffs covering the whole screen. */
+  static maxSize = { value: 8192 };
 
   constructor(tex: THREE.Texture, private cap: number, additive: boolean) {
     this.pos = new Float32Array(cap * 3);
@@ -41,13 +50,13 @@ class ParticleSystem {
     this.geo.setAttribute('aColor', new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage));
     this.geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1).setUsage(THREE.DynamicDrawUsage));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { tMap: { value: tex }, uScale: ParticleSystem.scale },
+      uniforms: { tMap: { value: tex }, uScale: ParticleSystem.scale, uMaxSize: ParticleSystem.maxSize },
       vertexShader: `
-        attribute vec4 aColor; attribute float aSize; uniform float uScale; varying vec4 vColor;
+        attribute vec4 aColor; attribute float aSize; uniform float uScale; uniform float uMaxSize; varying vec4 vColor;
         void main(){
           vColor = aColor;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = aSize * uScale / max(0.1, -mv.z);
+          gl_PointSize = min(aSize * uScale / max(0.1, -mv.z), uMaxSize);
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `
@@ -106,6 +115,7 @@ class ParticleSystem {
       i++;
     }
     this.geo.setDrawRange(0, this.n);
+    this.points.visible = this.n > 0;
     (this.geo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (this.geo.attributes.aColor as THREE.BufferAttribute).needsUpdate = true;
     (this.geo.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
@@ -175,10 +185,13 @@ export const COLORS = {
 export class FX {
   readonly group = new THREE.Group();
   private sys: Record<'spark' | 'fire' | 'smoke' | 'blood' | 'glow' | 'magic' | 'dust', ParticleSystem>;
-  private decals: THREE.Mesh[] = [];
+  // decals live in a ring of DECAL_CAP slots; each kind (texture) is drawn as one instanced mesh
+  private decalMeshes: THREE.InstancedMesh[] = [];
+  private decalKind = new Int8Array(DECAL_CAP).fill(-1);
+  private decalMat = new Float32Array(DECAL_CAP * 16);
   private decalIdx = 0;
-  private decalMats: THREE.MeshBasicMaterial[];
-  private scorchMat: THREE.MeshBasicMaterial;
+  private decalDirty = false;
+  private scorchKind = 3;
   private tracers: Tracer[] = [];
   private gibs: Gib[] = [];
   private gibMesh: THREE.InstancedMesh;
@@ -208,13 +221,15 @@ export class FX {
     const decalGeo = new THREE.PlaneGeometry(1, 1);
     const mkDecalMat = (s: SpriteName, color: number, opacity = 0.9) =>
       new THREE.MeshBasicMaterial({ map: sprite(s), color, transparent: true, opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-    this.decalMats = [mkDecalMat('dirt_02', 0x6a0010), mkDecalMat('dirt_03', 0x5a000c), mkDecalMat('circle_05', 0x70000e, 0.8)];
-    this.scorchMat = mkDecalMat('scorch_01', 0x000000, 0.85);
-    for (let i = 0; i < 160; i++) {
-      const m = new THREE.Mesh(decalGeo, this.decalMats[0]);
+    // three blood splats, then scorch (kind 3)
+    for (const mat of [mkDecalMat('dirt_02', 0x6a0010), mkDecalMat('dirt_03', 0x5a000c), mkDecalMat('circle_05', 0x70000e, 0.8), mkDecalMat('scorch_01', 0x000000, 0.85)]) {
+      const m = new THREE.InstancedMesh(decalGeo, mat, DECAL_CAP);
+      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      m.count = 0;
       m.visible = false;
+      m.frustumCulled = false;
       m.renderOrder = 1;
-      this.decals.push(m);
+      this.decalMeshes.push(m);
       this.group.add(m);
     }
     // tracers
@@ -239,7 +254,8 @@ export class FX {
     this.gibMesh.frustumCulled = false;
     this.group.add(this.gibMesh);
     // flash lights
-    for (let i = 0; i < 4; i++) {
+    // phones keep the world scene at a fixed 8 lights: 5 pooled world lights + these 3
+    for (let i = 0; i < (lowSpec ? 3 : 4); i++) {
       const l = new THREE.PointLight(0xffaa55, 0, 14, 1.6);
       this.group.add(l);
       this.lights.push({ l, life: 0, max: 1, i0: 0 });
@@ -248,11 +264,14 @@ export class FX {
 
   setParticleScale(renderHeight: number, fovDeg: number): void {
     ParticleSystem.scale.value = (renderHeight * 0.5) / Math.tan((fovDeg * Math.PI) / 360);
+    // phones: no sprite wider than half the screen height; desktop: effectively unlimited
+    ParticleSystem.maxSize.value = lowSpec ? renderHeight * 0.5 : 8192;
   }
 
   // ------------------------------------------------------------------ emitters
 
   sparks(p: Vec3, n: number, speed = 8, color = COLORS.spark, size = 0.12): void {
+    if (n >= 4) n = cut(n);
     for (let i = 0; i < n; i++) {
       const v = randDir(speed * (0.4 + Math.random() * 0.8));
       this.sys.spark.emit(p, v, 0.2 + Math.random() * 0.35, size, size * 0.3, color, 1, 14, 1.5);
@@ -260,6 +279,7 @@ export class FX {
   }
 
   blood(p: Vec3, n: number, dir: Vec3 | null = null, force = 7): void {
+    n = cut(n);
     for (let i = 0; i < n; i++) {
       const v = randDir(force * (0.3 + Math.random()));
       if (dir) { v.x += dir.x * force; v.y += dir.y * force + 2; v.z += dir.z * force; }
@@ -269,13 +289,14 @@ export class FX {
   }
 
   bloodMist(p: Vec3, n: number, size = 0.9): void {
+    n = cut(n);
     for (let i = 0; i < n; i++) {
       this.sys.smoke.emit(p, randDir(2), 0.5 + Math.random() * 0.4, size * 0.5, size * 1.6, COLORS.blood, 0.55, -0.5, 2);
     }
   }
 
   explosion(p: Vec3, r: number, color = COLORS.fire): void {
-    const n = Math.floor(10 + r * 6);
+    const n = cut(Math.floor(10 + r * 6));
     for (let i = 0; i < n; i++) {
       const v = randDir(r * (1.4 + Math.random() * 2));
       this.sys.fire.emit(p, v, 0.35 + Math.random() * 0.35, r * 0.45, r * 0.9, color, 1, -2, 4);
@@ -286,17 +307,17 @@ export class FX {
       this.sys.smoke.emit(p, v, 1.1 + Math.random() * 0.8, r * 0.4, r * 1.3, COLORS.smoke, 0.75, -1.5, 2.5);
     }
     this.sparks(p, Math.floor(r * 6), r * 4);
-    this.sys.glow.emit(p, { x: 0, y: 0, z: 0 }, 0.18, r * 2.2, r * 3.2, color, 1);
+    this.sys.glow.emit(p, ZERO, 0.18, r * 2.2, r * 3.2, color, 1);
     this.flashLight(p, color.getHex(), 5 + r, r * 4.5, 0.25);
   }
 
   muzzle(p: Vec3, color = COLORS.spark, size = 0.6): void {
-    this.sys.glow.emit(p, { x: 0, y: 0, z: 0 }, 0.06, size, size * 1.4, color, 1);
+    this.sys.glow.emit(p, ZERO, 0.06, size, size * 1.4, color, 1);
     this.flashLight(p, color.getHex(), 3, 9, 0.07);
   }
 
   glow(p: Vec3, size: number, color: THREE.Color, life = 0.15, alpha = 1): void {
-    this.sys.glow.emit(p, { x: 0, y: 0, z: 0 }, life, size, size * 1.3, color, alpha);
+    this.sys.glow.emit(p, ZERO, life, size, size * 1.3, color, alpha);
   }
 
   magic(p: Vec3, n: number, color: THREE.Color, speed = 3, size = 0.4): void {
@@ -304,6 +325,7 @@ export class FX {
   }
 
   smoke(p: Vec3, n: number, size = 0.6, color = COLORS.smokeLight, alpha = 0.5): void {
+    n = cut(n);
     for (let i = 0; i < n; i++) {
       const v = randDir(1);
       v.y = Math.abs(v.y) + 0.8;
@@ -312,9 +334,11 @@ export class FX {
   }
 
   dust(p: Vec3, n: number, spread = 3): void {
+    n = cut(n);
+    const v = scratchDir;
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
-      const v = { x: Math.cos(a) * spread * (0.5 + Math.random()), y: 0.5 + Math.random(), z: Math.sin(a) * spread * (0.5 + Math.random()) };
+      v.x = Math.cos(a) * spread * (0.5 + Math.random()); v.y = 0.5 + Math.random(); v.z = Math.sin(a) * spread * (0.5 + Math.random());
       this.sys.dust.emit(p, v, 0.6 + Math.random() * 0.4, 0.5, 1.4, COLORS.smokeLight, 0.6, 0, 2.5);
     }
   }
@@ -339,14 +363,37 @@ export class FX {
   }
 
   decal(p: Vec3, n: Vec3, size: number, kind: 'blood' | 'scorch' = 'blood'): void {
-    const m = this.decals[this.decalIdx];
-    this.decalIdx = (this.decalIdx + 1) % this.decals.length;
-    m.material = kind === 'scorch' ? this.scorchMat : this.decalMats[Math.floor(Math.random() * this.decalMats.length)];
-    m.position.set(p.x + n.x * 0.02, p.y + n.y * 0.02, p.z + n.z * 0.02);
-    m.lookAt(p.x + n.x, p.y + n.y, p.z + n.z);
-    m.rotateZ(Math.random() * Math.PI * 2);
-    m.scale.setScalar(size);
-    m.visible = true;
+    const i = this.decalIdx;
+    this.decalIdx = (this.decalIdx + 1) % DECAL_CAP;
+    this.decalKind[i] = kind === 'scorch' ? this.scorchKind : Math.floor(Math.random() * this.scorchKind);
+    // same orientation maths as a plain mesh: face along the surface normal, random spin about it
+    const d = this.dummy;
+    d.position.set(p.x + n.x * 0.02, p.y + n.y * 0.02, p.z + n.z * 0.02);
+    d.scale.set(1, 1, 1);
+    d.lookAt(p.x + n.x, p.y + n.y, p.z + n.z);
+    d.rotateZ(Math.random() * Math.PI * 2);
+    d.scale.setScalar(size);
+    d.updateMatrix();
+    d.matrix.toArray(this.decalMat, i * 16);
+    this.decalDirty = true;
+  }
+
+  /** Rebuild the per-kind instance lists after decals were added or cleared. */
+  private flushDecals(): void {
+    this.decalDirty = false;
+    for (let k = 0; k < this.decalMeshes.length; k++) {
+      const m = this.decalMeshes[k];
+      const arr = m.instanceMatrix.array as Float32Array;
+      let c = 0;
+      for (let i = 0; i < DECAL_CAP; i++) {
+        if (this.decalKind[i] !== k) continue;
+        arr.set(this.decalMat.subarray(i * 16, i * 16 + 16), c * 16);
+        c++;
+      }
+      m.count = c;
+      m.visible = c > 0;
+      m.instanceMatrix.needsUpdate = true;
+    }
   }
 
   /** Splatter blood decals around a point by raycasting in random directions. */
@@ -364,6 +411,7 @@ export class FX {
   }
 
   gibBurst(p: Vec3, n: number, force = 9, scale = 0.22, palette: 'flesh' | 'metal' = 'flesh'): void {
+    n = cut(n);
     const floorHit = raycastWorld(p, { x: 0, y: -1, z: 0 }, 30);
     const floor = floorHit ? p.y - floorHit.dist : 0;
     for (let i = 0; i < n; i++) {
@@ -418,6 +466,7 @@ export class FX {
 
   update(dt: number): void {
     this.trauma = Math.max(0, this.trauma - dt * 1.6);
+    if (this.decalDirty) this.flushDecals();
     for (const s of Object.values(this.sys)) s.update(dt);
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
@@ -470,6 +519,7 @@ export class FX {
       this.gibMesh.setMatrixAt(n++, this.dummy.matrix);
     }
     this.gibMesh.count = n;
+    this.gibMesh.visible = n > 0;
     this.gibMesh.instanceMatrix.needsUpdate = true;
     if (this.gibMesh.instanceColor) this.gibMesh.instanceColor.needsUpdate = true;
   }
@@ -477,14 +527,19 @@ export class FX {
   clear(): void {
     for (const s of Object.values(this.sys)) s.clear();
     this.gibs = [];
-    for (const d of this.decals) d.visible = false;
+    this.decalKind.fill(-1);
+    this.decalDirty = true;
     for (const t of this.tracers) { t.life = 0; t.mesh.visible = false; }
   }
 }
+
+// Shared result of randDir/dust: every caller consumes it before asking for the next one.
+const scratchDir: Vec3 = { x: 0, y: 0, z: 0 };
 
 function randDir(speed: number): Vec3 {
   const u = Math.random() * 2 - 1;
   const a = Math.random() * Math.PI * 2;
   const r = Math.sqrt(1 - u * u);
-  return { x: r * Math.cos(a) * speed, y: u * speed, z: r * Math.sin(a) * speed };
+  scratchDir.x = r * Math.cos(a) * speed; scratchDir.y = u * speed; scratchDir.z = r * Math.sin(a) * speed;
+  return scratchDir;
 }

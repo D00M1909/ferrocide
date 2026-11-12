@@ -911,6 +911,28 @@ button small {
   text-shadow: 2px 2px 0 #000;
   opacity: 0;
 }
+.hud-tip {
+  position: absolute;
+  top: 68%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 78%;
+  padding: 7px 14px;
+  background: rgba(0, 0, 0, 0.6);
+  border-left: 3px solid #ffe066;
+  font-family: 'Pixel', monospace;
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: 0.14em;
+  color: #fff;
+  text-align: center;
+  opacity: 0;
+}
+/* phones: the lower middle belongs to the thumbs, so hints sit above the crosshair */
+body.touch .hud-tip {
+  top: 23%;
+  font-size: 24px;
+}
 .trial {
   font-family: 'Pixel', monospace;
   font-size: 15px;
@@ -1091,21 +1113,22 @@ body.touch input,
 body.touch select {
   touch-action: manipulation;
 }
-body.touch .setting input[type='checkbox'] {
-  width: 22px;
-  height: 22px;
-}
-
 body.touch #touch {
   position: absolute;
-  inset: 0;
+  /* stay above the iPhone home bar, whose swipe would otherwise eat presses on the bottom row */
+  inset: 0 0 env(safe-area-inset-bottom, 0px) 0;
   pointer-events: auto;
   touch-action: none;
   font-family: 'Future', sans-serif;
   --s: var(--ts, 1);
 }
-body.touch #touch.on {
+body.touch #touch.on,
+body.touch #touch.preview {
   display: block;
+}
+/* behind the tap-to-play screen: drawn so the player can see where everything is, not live */
+body.touch #touch.preview:not(.on) {
+  pointer-events: none;
 }
 .t-btn,
 .t-slot,
@@ -1130,58 +1153,55 @@ body.touch #touch.on {
   border-color: #fff;
   color: #fff;
 }
+/* The right thumb rests on JUMP in the corner. DASH is straight above it and SLIDE beside it,
+   each a short roll away; FIRE sits on the diagonal, and the weapons are one reach further up. */
 .t-jump {
-  width: calc(76px * var(--s));
-  height: calc(76px * var(--s));
-  right: calc(20px * var(--s));
-  bottom: calc(20px * var(--s));
+  width: calc(80px * var(--s));
+  height: calc(80px * var(--s));
+  right: calc(18px * var(--s));
+  bottom: calc(18px * var(--s));
+  font-size: calc(11px * var(--s));
+}
+.t-dash {
+  width: calc(68px * var(--s));
+  height: calc(68px * var(--s));
+  right: calc(22px * var(--s));
+  bottom: calc(110px * var(--s));
+  border-color: rgba(69, 200, 255, 0.7);
+}
+.t-slide {
+  width: calc(64px * var(--s));
+  height: calc(64px * var(--s));
+  right: calc(110px * var(--s));
+  bottom: calc(14px * var(--s));
 }
 .t-fire {
-  width: calc(88px * var(--s));
-  height: calc(88px * var(--s));
+  width: calc(84px * var(--s));
+  height: calc(84px * var(--s));
   right: calc(112px * var(--s));
-  bottom: calc(52px * var(--s));
+  bottom: calc(90px * var(--s));
   border-color: rgba(255, 70, 50, 0.75);
   font-size: calc(13px * var(--s));
 }
-.t-dash {
-  width: calc(64px * var(--s));
-  height: calc(64px * var(--s));
-  right: calc(22px * var(--s));
-  bottom: calc(108px * var(--s));
-  border-color: rgba(69, 200, 255, 0.7);
-}
 .t-alt {
-  width: calc(62px * var(--s));
-  height: calc(62px * var(--s));
-  right: calc(122px * var(--s));
-  bottom: calc(152px * var(--s));
-}
-.t-punch {
   width: calc(60px * var(--s));
   height: calc(60px * var(--s));
-  right: calc(34px * var(--s));
-  bottom: calc(184px * var(--s));
-  border-color: rgba(255, 224, 102, 0.75);
-}
-.t-slide {
-  width: calc(62px * var(--s));
-  height: calc(62px * var(--s));
-  right: calc(212px * var(--s));
-  bottom: calc(18px * var(--s));
+  right: calc(208px * var(--s));
+  bottom: calc(102px * var(--s));
+  border-color: rgba(255, 224, 102, 0.6);
 }
 .t-weapons {
   position: absolute;
-  left: 46%;
-  bottom: calc(10px * var(--s));
+  right: calc(18px * var(--s));
+  bottom: calc(192px * var(--s));
   display: flex;
-  gap: calc(8px * var(--s));
+  gap: calc(6px * var(--s));
 }
 .t-slot {
   position: static;
-  width: calc(44px * var(--s));
-  height: calc(40px * var(--s));
-  font-size: calc(15px * var(--s));
+  width: calc(50px * var(--s));
+  height: calc(46px * var(--s));
+  font-size: calc(13px * var(--s));
 }
 .t-slot.cur {
   border-color: #fff;
@@ -1189,19 +1209,19 @@ body.touch #touch.on {
   color: #fff;
 }
 .t-pause {
-  left: 8px;
-  top: 8px;
-  width: calc(40px * var(--s));
-  height: calc(40px * var(--s));
+  left: 10px;
+  top: 10px;
+  width: calc(48px * var(--s));
+  height: calc(48px * var(--s));
   font-size: calc(14px * var(--s));
 }
 .t-stick {
   position: absolute;
   left: calc(120px * var(--s));
   top: calc(100% - 112px * var(--s));
-  width: 124px;
-  height: 124px;
-  margin: -62px 0 0 -62px;
+  width: calc(124px * var(--s));
+  height: calc(124px * var(--s));
+  margin: calc(-62px * var(--s)) 0 0 calc(-62px * var(--s));
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.16);
   background: rgba(10, 8, 10, 0.12);
@@ -1215,9 +1235,9 @@ body.touch #touch.on {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 52px;
-  height: 52px;
-  margin: -26px 0 0 -26px;
+  width: calc(52px * var(--s));
+  height: calc(52px * var(--s));
+  margin: calc(-26px * var(--s)) 0 0 calc(-26px * var(--s));
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.22);
   border: 2px solid rgba(255, 255, 255, 0.4);
@@ -1225,6 +1245,76 @@ body.touch #touch.on {
 .t-stick.on i {
   background: rgba(255, 42, 26, 0.5);
   border-color: #fff;
+}
+/* the two labels on the tap-to-play screen that say what each thumb does */
+.t-tip {
+  position: absolute;
+  top: 21%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-family: 'Future', sans-serif;
+  font-size: 19px;
+  letter-spacing: 0.14em;
+  color: #fff;
+  text-shadow: 0 2px 6px #000;
+}
+.t-tip b {
+  font-family: 'Pixel', monospace;
+  font-size: 12px;
+  font-weight: normal;
+  letter-spacing: 0.3em;
+  color: var(--steel-dim);
+}
+.t-tip small {
+  font-family: 'Pixel', monospace;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  color: #c9ccd6;
+}
+.t-tip i {
+  font-style: normal;
+  color: #ffe066;
+}
+.t-tip-l {
+  left: 7%;
+  top: 31%;
+  text-align: left;
+}
+.t-tip-r {
+  right: 7%;
+  text-align: right;
+}
+/* settings: two columns of thumb-sized rows instead of one long list of mouse-sized ones */
+body.touch .settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 34px;
+}
+body.touch .panel {
+  max-width: 96vw;
+}
+body.touch .setting {
+  grid-template-columns: 170px 1fr 58px;
+  min-height: 46px;
+  margin: 3px 0;
+  font-size: 14px;
+}
+body.touch .setting input[type='range'] {
+  height: 40px;
+}
+body.touch .setting input[type='checkbox'] {
+  width: 34px;
+  height: 34px;
+  accent-color: var(--red);
+}
+body.touch .setting select {
+  padding: 11px 8px;
+  font-size: 14px;
+}
+body.touch .controls {
+  font-size: 14px;
+  gap: 8px 24px;
 }
 
 @media (orientation: portrait) {

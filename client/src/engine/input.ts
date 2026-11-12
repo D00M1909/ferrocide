@@ -40,6 +40,8 @@ export class Input {
   /** Analog movement from the touch stick, each -1..1. Added to the keys. */
   stickX = 0;
   stickY = 0;
+  private gyroYaw = 0;
+  private gyroPitch = 0;
   /** Touch auto-fire: the game holds the trigger while the crosshair is on a target. */
   autoFire = false;
   /** When set, a bot writes into these instead of the real devices. */
@@ -98,9 +100,24 @@ export class Input {
     this.down.add(a);
   }
 
-  /** A one-off press with nothing held (weapon slots, pause). */
+  /** A one-off press with nothing held (weapon slots, a tap punch, a double-tap dash). */
   tap(a: Action): void {
     this.pressed.add(a);
+    if (LATCHED.includes(a)) this.latched.set(a, performance.now());
+  }
+
+  /** Look input as angles in radians (gyro aim), added on top of the drag. */
+  addAngles(yaw: number, pitch: number): void {
+    if (!this.locked) return;
+    this.gyroYaw += yaw;
+    this.gyroPitch += pitch;
+  }
+
+  /** Returns and clears the gyro turn since the last frame. */
+  consumeAngles(): [number, number] {
+    const r: [number, number] = this.enabled && !this.virtual ? [this.gyroYaw, this.gyroPitch] : [0, 0];
+    this.gyroYaw = this.gyroPitch = 0;
+    return r;
   }
 
   /** Look input in mouse counts from a touch drag. */

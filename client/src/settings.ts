@@ -1,3 +1,5 @@
+import { isTouch, lowSpec } from './platform';
+
 export interface Settings {
   name: string;
   sensitivity: number; // multiplier
@@ -12,6 +14,12 @@ export interface Settings {
   showFps: boolean;
   autoFire: boolean; // touch only: shoot while the crosshair is on an enemy
   aimAssist: boolean; // touch only: ease the crosshair toward nearby enemies
+  gyro: boolean; // touch only: turning the phone turns the view
+  gyroSens: number;
+  haptics: boolean; // touch only: short buzzes on dash, punch and damage
+  fpsCap: number; // frames per second, 0 = as fast as the screen goes
+  autoRes: boolean; // drop the render resolution when the frame rate can't hold
+  tips: boolean; // first-time hints during play
 }
 
 const DEFAULTS: Settings = {
@@ -28,6 +36,14 @@ const DEFAULTS: Settings = {
   showFps: false,
   autoFire: true,
   aimAssist: true,
+  gyro: false,
+  gyroSens: 1,
+  haptics: true,
+  // phones: a narrower view keeps distant enemies big enough to see, and 60 fps keeps them cool
+  ...(isTouch ? { fov: 90 } : {}),
+  fpsCap: lowSpec ? 60 : 0,
+  autoRes: lowSpec,
+  tips: true,
 };
 
 const KEY = 'ferrocide.settings.v1';

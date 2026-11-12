@@ -14,6 +14,9 @@ export const MODEL_FILES = [
 ] as const;
 const HUMANOID_ANIMS = 'h_anims';
 export type ModelName = (typeof MODEL_FILES)[number];
+/** Models only a co-op session needs: fetched on demand (ensureModel) instead of during the boot load. */
+const LAZY_MODELS: readonly ModelName[] = ['character_hazmat'];
+const BOOT_MODELS = MODEL_FILES.filter((m) => !LAZY_MODELS.includes(m));
 
 export const SPRITE_FILES = [
   'muzzle_01', 'muzzle_02', 'muzzle_04', 'spark_01', 'spark_04', 'spark_05', 'spark_06', 'smoke_01', 'smoke_04', 'smoke_07',
@@ -24,21 +27,49 @@ export type SpriteName = (typeof SPRITE_FILES)[number];
 
 const models = new Map<ModelName, GLTF>();
 const sprites = new Map<SpriteName, THREE.Texture>();
+const lazyLoads = new Map<ModelName, Promise<void>>();
+let gltfLoader: GLTFLoader | null = null;
+
+function loader(): GLTFLoader {
+  return (gltfLoader ??= new GLTFLoader().setMeshoptDecoder(MeshoptDecoder));
+}
+
+export function hasModel(name: ModelName): boolean {
+  return models.has(name);
+}
+
+/** Loads a lazy model once (a failed load can be retried); never rejects. Resolves immediately if it is already in. */
+export function ensureModel(name: ModelName): Promise<void> {
+  if (models.has(name)) return Promise.resolve();
+  let p = lazyLoads.get(name);
+  if (!p) {
+    p = loader().loadAsync(`/assets/models/${name}.glb`).then((g) => { models.set(name, g); }).catch((e) => {
+      console.warn('model failed', name, e);
+      lazyLoads.delete(name);
+    });
+    lazyLoads.set(name, p);
+  }
+  return p;
+}
+
+/** The co-op partner's character: call when a co-op session starts (host, join or lobby) so it is in before anyone needs it. */
+export function ensurePartnerModel(): Promise<void> {
+  return ensureModel('character_hazmat');
+}
 
 export async function loadAssets(onProgress: (f: number) => void): Promise<void> {
-  const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   const texLoader = new THREE.TextureLoader();
-  const total = MODEL_FILES.length + SPRITE_FILES.length + 1;
-  const humanoidClips = loader.loadAsync(`/assets/models/${HUMANOID_ANIMS}.glb`).then((g) => g.animations).catch((e) => {
+  const total = BOOT_MODELS.length + SPRITE_FILES.length + 1;
+  const humanoidClips = loader().loadAsync(`/assets/models/${HUMANOID_ANIMS}.glb`).then((g) => g.animations).catch((e) => {
     console.warn('humanoid animations failed', e);
     return [] as THREE.AnimationClip[];
   });
   let done = 0;
   const tick = () => onProgress(++done / total);
   await Promise.all([
-    ...MODEL_FILES.map(async (m) => {
+    ...BOOT_MODELS.map(async (m) => {
       try {
-        const g = await loader.loadAsync(`/assets/models/${m}.glb`);
+        const g = await loader().loadAsync(`/assets/models/${m}.glb`);
         if (m.startsWith('h_')) g.animations = await humanoidClips;
         models.set(m, g);
       } catch (e) {

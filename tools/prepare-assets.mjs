@@ -2,6 +2,11 @@
 // client/public/assets with stable names. Run after (re)downloading raw_assets.
 import fs from 'node:fs';
 import path from 'node:path';
+import { NodeIO } from '@gltf-transform/core';
+import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
+import { dedup, join, meshopt, prune, resample } from '@gltf-transform/functions';
+import { MeshoptEncoder } from 'meshoptimizer';
+import sharp from 'sharp';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(\w:)/, '$1')), '..');
 const raw = path.join(root, 'raw_assets');
@@ -18,10 +23,76 @@ function copy(src, dest) {
   fs.copyFileSync(s, d);
 }
 
-// Models (Quaternius via Poly Pizza, public domain)
-for (const m of ['enemy_small', 'enemy_flying', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher']) {
-  copy(`polypizza/${m}.glb`, `models/${m}.glb`);
+// Models (Quaternius via Poly Pizza, public domain), meshopt-compressed like the humanoids:
+// the game only reads positions, normals, UVs, skin weights and clips, so unused vertex
+// colours and second UV sets are dropped, animation keys are resampled and geometry is quantised.
+await MeshoptEncoder.ready;
+const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.encoder': MeshoptEncoder });
+/** sRGB byte for a linear colour channel. */
+const toSrgb8 = (c) => Math.round(255 * (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055));
+
+/**
+ * Merges the flat-coloured primitives of every skinned mesh into one primitive per mesh by moving the
+ * colours into a shared one-row palette texture (each vertex points at its material's texel), so a
+ * part with five materials costs one draw call. Parts with different bind poses stay separate meshes.
+ */
+async function paletteMerge(doc) {
+  const root = doc.getRoot();
+  const nodes = root.listNodes().filter((n) => n.getMesh() && n.getSkin() && n.getMesh().listPrimitives().length > 1);
+  const mats = [];
+  for (const n of nodes) for (const prim of n.getMesh().listPrimitives()) if (!mats.includes(prim.getMaterial())) mats.push(prim.getMaterial());
+  if (!mats.length) return;
+  const png = await sharp(Buffer.from(mats.flatMap((m) => m.getBaseColorFactor().slice(0, 3).map(toSrgb8))), { raw: { width: mats.length, height: 1, channels: 3 } }).png().toBuffer();
+  const tex = doc.createTexture('palette').setImage(new Uint8Array(png)).setMimeType('image/png');
+  const mat = doc.createMaterial('palette').setBaseColorTexture(tex).setMetallicFactor(0).setRoughnessFactor(1);
+  const buf = root.listBuffers()[0];
+  const acc = (type, arr) => doc.createAccessor().setType(type).setArray(arr).setBuffer(buf);
+  for (const n of nodes) {
+    const prims = n.getMesh().listPrimitives();
+    const total = prims.reduce((t, q) => t + q.getAttribute('POSITION').getCount(), 0);
+    const pos = new Float32Array(total * 3), nrm = new Float32Array(total * 3), uv = new Float32Array(total * 2);
+    const jnt = new Uint16Array(total * 4), wgt = new Float32Array(total * 4);
+    const ind = [];
+    let v0 = 0;
+    for (const q of prims) {
+      const count = q.getAttribute('POSITION').getCount();
+      const slot = mats.indexOf(q.getMaterial());
+      const el = [0, 0, 0, 0];
+      for (let k = 0; k < count; k++) {
+        pos.set(q.getAttribute('POSITION').getElement(k, el).slice(0, 3), (v0 + k) * 3);
+        nrm.set(q.getAttribute('NORMAL').getElement(k, el).slice(0, 3), (v0 + k) * 3);
+        jnt.set(q.getAttribute('JOINTS_0').getElement(k, el), (v0 + k) * 4);
+        wgt.set(q.getAttribute('WEIGHTS_0').getElement(k, el), (v0 + k) * 4);
+        uv.set([(slot + 0.5) / mats.length, 0.5], (v0 + k) * 2);
+      }
+      const I = q.getIndices();
+      for (let k = 0; k < I.getCount(); k++) ind.push(I.getScalar(k) + v0);
+      v0 += count;
+    }
+    const merged = doc.createPrimitive().setMaterial(mat).setIndices(acc('SCALAR', new Uint32Array(ind)))
+      .setAttribute('POSITION', acc('VEC3', pos)).setAttribute('NORMAL', acc('VEC3', nrm)).setAttribute('TEXCOORD_0', acc('VEC2', uv))
+      .setAttribute('JOINTS_0', acc('VEC4', jnt)).setAttribute('WEIGHTS_0', acc('VEC4', wgt));
+    const mesh = n.getMesh();
+    for (const q of prims) mesh.removePrimitive(q);
+    mesh.addPrimitive(merged);
+  }
 }
+
+for (const m of ['enemy_small', 'robot_flying', 'mech', 'character_hazmat', 'revolver_a', 'shotgun_b', 'rocket_launcher']) {
+  const src = path.join(raw, 'polypizza', `${m}.glb`);
+  if (!fs.existsSync(src)) { console.warn('missing', src); continue; }
+  const doc = await io.read(src);
+  for (const mesh of doc.getRoot().listMeshes()) {
+    for (const prim of mesh.listPrimitives()) for (const sem of ['COLOR_0', 'TEXCOORD_1']) prim.setAttribute(sem, null);
+  }
+  if (m === 'robot_flying') await paletteMerge(doc);
+  await doc.transform(dedup(), join(), prune(), resample(), meshopt({ encoder: MeshoptEncoder, level: 'medium' }));
+  const dest = path.join(out, 'models', `${m}.glb`);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  await io.write(dest, doc);
+  console.log(`${m}: ${fs.statSync(src).size} -> ${fs.statSync(dest).size} bytes`);
+}
+if (process.argv.includes('models')) process.exit(0); // `node tools/prepare-assets.mjs models`: models only
 
 // Particle sprites (Kenney Particle Pack, CC0)
 const particles = [

@@ -4,11 +4,13 @@
 // both players must agree on (enemies, damage, waves) is decided here, and every
 // client claim is validated and capped before it touches the world.
 import {
-  AIR_SPAWNS, GROUND_SPAWNS, HEALTH_PICKUPS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, blockedAt, inZone, lineOfSight, moveBody, raycastWorld,
+  AIR_SPAWNS, BOXES, GROUND_SPAWNS, HEALTH_PICKUPS, LAVA, PLAYER_SPAWNS, TOWER_SPAWNS, blockedAt, inZone, lineOfSight, moveBody, raycastWorld,
+  type Box,
 } from './arena';
 import {
-  ENEMIES, ENEMY_ATTACKS, HEALTH_PICKUP, PLAYER, PROJECTILES, PUNCH, SLAM, VARIANTS, WEAPONS, type EnemyKind, type ProjectileKind,
+  ENEMIES, ENEMY_ATTACKS, HEALTH_PICKUP, PLAYER, PROJECTILES, PUNCH, SLAM, VARIANTS, WAVE_RULES, WEAPONS, type EnemyKind, type ProjectileKind,
 } from './constants';
+import { endlessBossMul, endlessScale, generateWave } from './endless';
 import { angleDiff, clamp, dist, distXZ, rng, type Vec3 } from './math';
 import {
   ELITE_KINDS, ENEMY_KINDS, ENEMY_STATES, PROJ_KINDS, r2,
@@ -20,7 +22,7 @@ import {
   type Challenge, type Elite, type Gate, type Reward, type RoomPlan,
 } from './run';
 import { UPGRADES, UPGRADE_BY_ID, eligible } from './upgrades';
-import { MAX_ALIVE, WAVES, type WaveDef } from './waves';
+import { CLASSIC_WAVES, WAVES, aliveCap, type WaveDef } from './waves';
 
 interface SimPlayer {
   id: string;
@@ -44,6 +46,7 @@ interface SimPlayer {
   healBudget: number; // blood-heal rate limiter
   deathPos: Vec3;
   revive: number; // 0..REVIVE_TIME progress while a partner stands on the corpse
+  highT: number; // seconds spent on high ground (catwalks, towers)
   ups: string[]; // run upgrades
   spent: number; // style spent at forges
   bonus: number; // style granted by caches
@@ -80,6 +83,16 @@ interface SimEnemy {
   blinkCd: number;
   elite: Elite | null;
   spdMul: number;
+  // unstuck steering for ground chasers
+  steerAt: number; // last time steer() ran (a gap restarts the progress window)
+  winT: number;
+  winX: number;
+  winZ: number;
+  stuckT: number;
+  detourX: number;
+  detourZ: number;
+  detourT: number;
+  hopCd: number;
 }
 
 interface SimProjectile {
@@ -201,7 +214,15 @@ export class GameSim {
   private challenge: Challenge | null = null;
   private trialEnd = 0;
   private forgeEnd = 0;
-  private hurtMul = 1; // enemy damage scaling (depth, glass)
+  private hurtMul = 1; // enemy damage scaling (depth, glass, endless waves)
+  /** Classic only: the players chose to carry on past the last campaign wave. */
+  endless = false;
+  /** Mop-up of stragglers (tests switch it off to see the unassisted behaviour). */
+  mopEnabled = true;
+  private mopT = 0; // seconds with nothing left to spawn and only a few enemies alive
+  private mopOn = false;
+  private mopStart = 0;
+  private mopForceT = 0;
 
   constructor(seed = Date.now()) {
     this.rand = rng(seed);
@@ -256,6 +277,7 @@ export class GameSim {
       healBudget: BLOOD_HEAL_RATE,
       deathPos: { ...sp },
       revive: 0,
+      highT: 0,
       ups: [],
       spent: 0,
       bonus: 0,
@@ -298,6 +320,7 @@ export class GameSim {
     if (this.phase !== 'lobby') return;
     this.runStart = this.time;
     this.mode = mode === 'run' ? 'run' : 'classic';
+    this.endless = false;
     if (this.mode === 'run') {
       // dev/test: start deeper, or with upgrades already owned
       for (const p of this.players.values()) for (const u of ups) if (UPGRADE_BY_ID.has(u) && !p.ups.includes(u)) p.ups.push(u);
@@ -306,6 +329,25 @@ export class GameSim {
       return;
     }
     this.beginIntermission(clamp(Math.floor(num(wave, 1)), 1, WAVES.length), 2.5);
+  }
+
+  /**
+   * After the campaign's victory the host can carry on: waves past CLASSIC_WAVES are generated
+   * from the wave number (see endless.ts). Everyone is back on their feet for the next wave.
+   */
+  continueEndless(): void {
+    if (this.phase !== 'victory' || this.mode !== 'classic' || this.endless) return;
+    this.endless = true;
+    this.enemies.clear();
+    this.projectiles.clear();
+    this.queue = [];
+    for (const p of this.players.values()) {
+      if (!p.alive) this.respawn(p);
+      else this.topUp(p);
+    }
+    this.pickupAt.fill(0);
+    this.emit({ t: 'endless', wave: CLASSIC_WAVES + 1 });
+    this.beginIntermission(CLASSIC_WAVES + 1, 5);
   }
 
   playerState(id: string, raw: unknown): void {
@@ -543,6 +585,7 @@ export class GameSim {
           continue;
         }
       }
+      p.highT = p.alive && p.pos.y > WAVE_RULES.highGround ? p.highT + dt : Math.max(0, p.highT - dt * 2);
       if (p.hard > 0) {
         p.hardT -= dt;
         if (p.hardT <= 0) p.hard = Math.max(0, p.hard - PLAYER.hardDamageDecay * (this.has(p, 'g_ironhide') ? 2 : 1) * dt);
@@ -592,6 +635,7 @@ export class GameSim {
       (p) => [p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.vel.x), r2(p.vel.y), r2(p.vel.z), r2(p.yaw), r2(p.pitch), p.flags, p.weapon, Math.ceil(p.hp), p.alive ? 1 : 0, Math.floor(p.hard), p.connected ? 1 : 0, r2(p.revive / REVIVE_TIME), r2(p.deathPos.x), r2(p.deathPos.y), r2(p.deathPos.z), this.bank(p)] as PlayerSnap,
     );
     const snap: Snapshot = { t: r2(this.time), e, pr, pl, wave: this.wave, phase: this.phase, left: this.waveLeft, timer: r2(this.phaseTimer), pk: this.pickupMask(), mode: this.mode };
+    if (this.endless) snap.endless = true;
     if (this.mode === 'run') {
       const run: RunSnap = { d: this.depth };
       if (this.phase === 'choice') run.g = this.gates;
@@ -619,9 +663,12 @@ export class GameSim {
 
   private startWave(n: number): void {
     const plan = this.mode === 'run' ? this.plan : null;
-    const def: WaveDef = plan ?? WAVES[n - 1];
+    const def: WaveDef = plan ?? (n > CLASSIC_WAVES ? generateWave(n) : WAVES[n - 1]);
     this.phase = 'combat';
     this.wave = n;
+    this.mopT = 0;
+    this.mopOn = false;
+    if (this.mode === 'classic') this.hurtMul = this.endless ? endlessScale(n).dmg : 1;
     const coop = Math.max(1, this.connectedCount());
     this.queue = [];
     for (const g of def.groups) {
@@ -640,7 +687,16 @@ export class GameSim {
         t: 'room', d: n, layer: RUN.layers[layerOf(n)].name, title: plan.title, boss: plan.boss, elite: plan.elite,
         ch: this.challenge ?? undefined, prize: this.prize ?? undefined,
       });
-    } else this.emit({ t: 'wave', n, total: WAVES.length, title: def.title, boss: !!def.boss });
+    } else this.emit({ t: 'wave', n, total: CLASSIC_WAVES, title: def.title, boss: !!def.boss, endless: this.endless || undefined });
+  }
+
+  /** Between waves: a modest top-up that also clears hard damage. */
+  private topUp(p: SimPlayer): void {
+    if (!p.alive) return;
+    const before = p.hp;
+    p.hard = 0;
+    p.hp = Math.min(PLAYER.maxHealth, p.hp + WAVE_RULES.clearHeal);
+    this.emit({ t: 'heal', pid: p.id, hp: r2(p.hp), amt: r2(p.hp - before), hard: 0 });
   }
 
   private updatePhase(dt: number): void {
@@ -655,7 +711,7 @@ export class GameSim {
     } else if (this.phase === 'combat') {
       let alive = 0;
       for (const e of this.enemies.values()) if (e.hp > 0) alive++;
-      const cap = this.wave > (this.mode === 'run' ? 8 : 4) ? MAX_ALIVE + 4 : MAX_ALIVE;
+      const cap = aliveCap(this.wave > (this.mode === 'run' ? 8 : 4), this.connectedCount());
       while (this.queue.length && this.queue[0].at <= this.time && alive < cap) {
         const q = this.queue.shift()!;
         this.spawnEnemy(q.kind, q.where, q.el);
@@ -663,18 +719,106 @@ export class GameSim {
       }
       // if the arena is empty, pull the next group forward so pacing never stalls
       if (alive === 0 && this.queue.length) this.queue[0].at = Math.min(this.queue[0].at, this.time + 0.6);
+      this.updateMop(dt, alive);
       if (alive === 0 && this.queue.length === 0 && this.mode === 'run') {
         this.emit({ t: 'clear', n: this.wave });
         this.roomCleared();
       } else if (alive === 0 && this.queue.length === 0) {
         this.emit({ t: 'clear', n: this.wave });
-        if (this.wave >= WAVES.length) this.finish(true);
+        if (this.wave >= CLASSIC_WAVES && !this.endless) this.finish(true);
         else {
-          for (const p of this.players.values()) if (!p.alive) this.respawn(p);
+          for (const p of this.players.values()) {
+            if (!p.alive) this.respawn(p);
+            else this.topUp(p);
+          }
           this.beginIntermission(this.wave + 1, 5);
         }
       }
     }
+  }
+
+  // ------------------------------------------------------------------ mop-up
+
+  private nearestPlayer(pos: Vec3): SimPlayer | null {
+    let best: SimPlayer | null = null, bd = 1e9;
+    for (const p of this.players.values()) {
+      if (!p.alive || !p.connected) continue;
+      const d = dist(p.pos, pos);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  }
+
+  /**
+   * Stragglers: with nothing left to spawn and only a few enemies alive, the hunt starts after a
+   * delay. Hunters move faster and fight closer; towered ones come down at once, and anything
+   * still far away or out of sight later in the hunt is teleported next to the player.
+   */
+  private updateMop(dt: number, alive: number): void {
+    const R = WAVE_RULES;
+    let boss = false;
+    for (const e of this.enemies.values()) if (e.kind === 'colossus') boss = true;
+    if (!this.mopEnabled || boss || this.queue.length > 0 || alive === 0 || alive > R.mopCount) {
+      this.mopT = 0;
+      this.mopOn = false;
+      return;
+    }
+    this.mopT += dt;
+    if (!this.mopOn) {
+      if (this.mopT < R.mopAfter) return;
+      this.mopOn = true;
+      this.mopStart = this.time;
+      this.mopForceT = 0;
+      for (const e of this.enemies.values()) if (!ENEMIES[e.kind].flying && e.pos.y > 3) this.relocateNear(e);
+      return;
+    }
+    if (this.time - this.mopStart < R.mopForce) return;
+    this.mopForceT -= dt;
+    if (this.mopForceT > 0) return;
+    this.mopForceT = R.mopForceEvery;
+    for (const e of this.enemies.values()) {
+      if (e.state === 'spawn' || e.state === 'windup' || e.state === 'attack' || e.state === 'dive') continue;
+      const p = this.nearestPlayer(e.pos);
+      if (!p) continue;
+      const def = ENEMIES[e.kind];
+      const seen = lineOfSight({ x: p.pos.x, y: p.pos.y + 1.5, z: p.pos.z }, { x: e.pos.x, y: e.pos.y + (def.flying ? 0 : def.height * 0.5), z: e.pos.z });
+      if (dist(p.pos, e.pos) > R.mopFar || !seen) this.relocateNear(e);
+    }
+  }
+
+  /** Put an enemy near the nearest player (on their level if they are up high), with a spawn telegraph. */
+  private relocateNear(e: SimEnemy): void {
+    const p = this.nearestPlayer(e.pos);
+    if (!p) return;
+    const def = ENEMIES[e.kind];
+    const base = e.kind === 'warden' || e.kind === 'drone' ? 12 : 8;
+    const eye = { x: p.pos.x, y: p.pos.y + 1.5, z: p.pos.z };
+    let chosen: Vec3 | null = null, fallback: Vec3 | null = null;
+    for (let i = 0; i < 24 && !chosen; i++) {
+      const ang = this.rand() * Math.PI * 2;
+      const r = base + this.rand() * 4 - (i > 12 ? 3 : 0);
+      const x = clamp(p.pos.x + Math.cos(ang) * r, -33, 33), z = clamp(p.pos.z + Math.sin(ang) * r, -33, 33);
+      let y: number;
+      if (def.flying) y = clamp(p.pos.y + 3, 2, 12);
+      else {
+        const level = p.pos.y > WAVE_RULES.highGround && i % 2 === 0 ? p.pos.y + 0.3 : 1.3;
+        y = 0;
+        for (const b of BOXES) if (b.max.y <= level && b.max.y > y && x > b.min.x && x < b.max.x && z > b.min.z && z < b.max.z) y = b.max.y;
+      }
+      if (blockedAt(x, y + 0.05, z, def.radius * 0.8, def.flying ? 0.9 : def.height * 0.9)) continue;
+      const c = { x, y, z };
+      fallback ??= c;
+      if (lineOfSight(eye, { x, y: y + (def.flying ? 0 : def.height * 0.5), z })) chosen = c;
+    }
+    const to = chosen ?? fallback;
+    if (!to) return;
+    e.pos = { ...to };
+    e.vel = { x: 0, y: 0, z: 0 };
+    e.grounded = false;
+    e.detourT = 0;
+    e.cooldown = Math.max(e.cooldown, 1);
+    this.setState(e, 'spawn', 0.9);
+    this.emit({ t: 'spawn', id: e.id, k: e.kind, p: vv(e.pos), el: e.elite ?? undefined });
   }
 
   // --------------------------------------------------------------------- run
@@ -943,6 +1087,9 @@ export class GameSim {
     if (this.mode === 'run') {
       runHp = enemyScale(this.depth).hp * (el === 'armored' ? 1.8 : 1);
       if (kind === 'colossus') runHp *= RUN.bossHp[layerOf(this.depth)];
+    } else if (this.endless) {
+      runHp = endlessScale(this.wave).hp;
+      if (kind === 'colossus') runHp *= endlessBossMul(this.wave);
     }
     const hp = def.hp * coopHp * runHp;
     const e: SimEnemy = {
@@ -953,6 +1100,7 @@ export class GameSim {
       burstLeft: 0, strafeDir: this.rand() < 0.5 ? -1 : 1, phase: 1,
       summonT: ENEMY_ATTACKS.colossus.summonEvery, cycle: 0, shots: 0,
       lastStrikeT: -9, lastStrikeAid: 0, lastStrikeDmg: 0, invulnT: 0, blinkCd: 2 + this.rand() * 2,
+      steerAt: -9, winT: 0, winX: pos.x, winZ: pos.z, stuckT: 0, detourX: 0, detourZ: 0, detourT: 0, hopCd: 0,
     };
     this.enemies.set(e.id, e);
     this.emit({ t: 'spawn', id: e.id, k: kind, p: vv(pos), el: el ?? undefined });
@@ -1064,6 +1212,7 @@ export class GameSim {
     e.cooldown -= dt;
     e.invulnT = Math.max(0, e.invulnT - dt);
     e.blinkCd -= dt;
+    e.hopCd -= dt;
     if (e.state === 'spawn') {
       if (e.stateT <= 0) this.setState(e, 'move', 0);
       if (!def.flying) this.physics(e, dt, 0, 0);
@@ -1085,8 +1234,9 @@ export class GameSim {
   /** Ground locomotion with separation + wall sliding. wishX/wishZ is desired velocity. */
   private physics(e: SimEnemy, dt: number, wishX: number, wishZ: number, accel = 30): void {
     const def = ENEMIES[e.kind];
-    wishX *= e.spdMul;
-    wishZ *= e.spdMul;
+    const spd = e.spdMul * (this.mopOn ? WAVE_RULES.mopSpeed : 1);
+    wishX *= spd;
+    wishZ *= spd;
     for (const o of this.enemies.values()) {
       if (o === e) continue;
       const dx = e.pos.x - o.pos.x, dz = e.pos.z - o.pos.z;
@@ -1117,6 +1267,78 @@ export class GameSim {
     }
   }
 
+  /**
+   * Walk toward (tx, tz). A ground enemy that wants to move but isn't getting anywhere for a
+   * moment hops a low obstacle or sidesteps a tall one, taking the shorter way round.
+   */
+  private steer(e: SimEnemy, dt: number, tx: number, tz: number, speed: number, accel = 30, weave = 0): void {
+    const R = WAVE_RULES;
+    const dx = tx - e.pos.x, dz = tz - e.pos.z;
+    const l = Math.hypot(dx, dz) || 1;
+    let wx = dx / l + (-dz / l) * weave, wz = dz / l + (dx / l) * weave;
+    if (e.detourT > 0) {
+      e.detourT -= dt;
+      wx = (dx / l) * 0.3 + e.detourX;
+      wz = (dz / l) * 0.3 + e.detourZ;
+      const n = Math.hypot(wx, wz) || 1;
+      wx /= n;
+      wz /= n;
+    } else {
+      // a gap since the last call (it was attacking, stunned...) restarts the progress window
+      if (this.time - e.steerAt > 0.2) { e.winT = 0; e.winX = e.pos.x; e.winZ = e.pos.z; e.stuckT = 0; }
+      e.winT += dt;
+      if (e.winT >= R.stuckWindow) {
+        const moved = Math.hypot(e.pos.x - e.winX, e.pos.z - e.winZ);
+        e.stuckT = l > 3.5 && moved < speed * e.spdMul * e.winT * R.stuckProgress ? e.stuckT + e.winT : 0;
+        e.winT = 0;
+        e.winX = e.pos.x;
+        e.winZ = e.pos.z;
+        if (e.stuckT >= R.stuckAfter) { e.stuckT = 0; this.unstick(e, dx / l, dz / l, speed); }
+      }
+    }
+    e.steerAt = this.time;
+    this.physics(e, dt, wx * speed, wz * speed, accel);
+  }
+
+  /** Work out what is in the way along (wx, wz) and either hop it or start a sidestep around it. */
+  private unstick(e: SimEnemy, wx: number, wz: number, speed: number): void {
+    const def = ENEMIES[e.kind];
+    const hx = def.radius * 0.7;
+    const px = e.pos.x + wx * (hx + 0.5), pz = e.pos.z + wz * (hx + 0.5);
+    let blocker: Box | null = null;
+    for (const b of BOXES) {
+      if (b.surface === 'invisible') continue;
+      if (px + hx > b.min.x && px - hx < b.max.x && pz + hx > b.min.z && pz - hx < b.max.z && e.pos.y + def.height * 0.9 > b.min.y && e.pos.y + 0.3 < b.max.y) { blocker = b; break; }
+    }
+    if (blocker && e.grounded && e.hopCd <= 0 && blocker.min.y < e.pos.y + 0.7 && blocker.max.y - e.pos.y <= 1.9) {
+      // low enough to jump onto
+      e.vel.y = Math.sqrt(2 * PLAYER.gravity * (blocker.max.y - e.pos.y + 0.4));
+      e.vel.x += wx * speed * 0.6;
+      e.vel.z += wz * speed * 0.6;
+      e.hopCd = 1;
+      if (e.kind === 'husk') this.emit({ t: 'atk', id: e.id, a: 'leap', dur: 0.6 });
+      return;
+    }
+    const perpX = -wz, perpZ = wx;
+    let side = e.strafeDir;
+    let need = 3;
+    if (blocker) {
+      let plus = 0, minus = 0;
+      for (const cx of [blocker.min.x, blocker.max.x]) {
+        for (const cz of [blocker.min.z, blocker.max.z]) {
+          const lat = (cx - e.pos.x) * perpX + (cz - e.pos.z) * perpZ;
+          plus = Math.max(plus, lat);
+          minus = Math.max(minus, -lat);
+        }
+      }
+      side = plus <= minus ? 1 : -1;
+      need = (side > 0 ? plus : minus) + def.radius + 0.6;
+    } else e.strafeDir *= -1;
+    e.detourX = perpX * side;
+    e.detourZ = perpZ * side;
+    e.detourT = clamp(need / Math.max(1, speed * 0.9 * e.spdMul), 0.5, 2.2);
+  }
+
   /** Where a target will be after `t` seconds (ground-plane lead). */
   private lead(t: SimPlayer, time: number, frac = 1): Vec3 {
     return { x: t.pos.x + t.vel.x * time * frac, y: t.pos.y, z: t.pos.z + t.vel.z * time * frac };
@@ -1132,16 +1354,21 @@ export class GameSim {
     switch (e.state) {
       case 'move': {
         this.face(e, t.pos, dt, 10);
-        this.physics(e, dt, (dx / l) * ENEMIES.husk.speed, (dz / l) * ENEMIES.husk.speed);
+        this.steer(e, dt, t.pos.x, t.pos.z, ENEMIES.husk.speed);
+        // a player who has camped on high ground for a while gets leapt at from further out, more often
+        const eager = t.highT > WAVE_RULES.highAfter;
         if (d < a.range && Math.abs(dy) < 2.2) {
           this.setState(e, 'windup', a.windup, 'swipe');
           this.emit({ t: 'atk', id: e.id, a: 'swipe', dur: a.windup });
-        } else if (e.grounded && dy > 2.5 && d < 9 && e.cooldown <= 0) {
+        } else if (e.grounded && dy > 2.5 && d < (eager ? 15 : 9) && e.cooldown <= 0) {
           // leap up at players camping on high ground
-          e.vel.y = 19;
-          e.vel.x = (dx / l) * 8;
-          e.vel.z = (dz / l) * 8;
-          e.cooldown = 3;
+          const vy = eager ? clamp(Math.sqrt(2 * PLAYER.gravity * (dy + 0.8)), 12, 24) : 19;
+          const air = (vy + Math.sqrt(Math.max(0, vy * vy - 2 * PLAYER.gravity * dy))) / PLAYER.gravity;
+          const hs = eager ? Math.min(12, d / Math.max(0.4, air)) : 8;
+          e.vel.y = vy;
+          e.vel.x = (dx / l) * hs;
+          e.vel.z = (dz / l) * hs;
+          e.cooldown = eager ? 1.6 : 3;
           this.emit({ t: 'atk', id: e.id, a: 'leap', dur: 0.6 });
         }
         break;
@@ -1193,43 +1420,45 @@ export class GameSim {
     const a = ENEMY_ATTACKS.stalker;
     if (!t) { this.physics(e, dt, 0, 0); return; }
     const d = distXZ(e.pos, t.pos);
-    const dx = t.pos.x - e.pos.x, dz = t.pos.z - e.pos.z;
-    const l = Math.hypot(dx, dz) || 1;
     switch (e.state) {
       case 'move': {
         this.face(e, t.pos, dt, 12);
         // weave while closing in so it's hard to track
         const weave = Math.sin(this.time * 4 + e.id) * 0.6;
         const sp = ENEMIES.stalker.speed;
-        this.physics(e, dt, ((dx / l) + (-dz / l) * weave) * sp, ((dz / l) + (dx / l) * weave) * sp);
+        this.steer(e, dt, t.pos.x, t.pos.z, sp, 30, weave);
         if (d < a.range && Math.abs(t.pos.y - e.pos.y) < 2.2) {
           this.setState(e, 'windup', a.windup, 'slash');
           this.emit({ t: 'atk', id: e.id, a: 'slash', dur: a.windup });
-        } else if (e.blinkCd <= 0 && d < 28 && t.pos.y < 3) {
-          // blink to the target's flank/back
+        } else if (e.blinkCd <= 0 && d < 28) {
+          // blink in close behind the target (to either side, whichever is open) so a player who
+          // stands still gets cut; one who dashes away during the telegraph does not
           const side = this.rand() < 0.5 ? 1 : -1;
-          const back = -1;
           const fwdX = -Math.sin(t.yaw), fwdZ = -Math.cos(t.yaw);
-          const to = {
-            x: clamp(t.pos.x + fwdX * back * a.blinkDist + -fwdZ * side * 2, -34, 34),
-            y: t.pos.y,
-            z: clamp(t.pos.z + fwdZ * back * a.blinkDist + fwdX * side * 2, -34, 34),
-          };
-          if (!blockedAt(to.x, to.y + 0.05, to.z, 0.4, 1.8)) {
+          for (const s of [side, -side]) {
+            const to = {
+              x: clamp(t.pos.x - fwdX * a.blinkDist + -fwdZ * s * a.blinkSide, -34, 34),
+              y: t.pos.y,
+              z: clamp(t.pos.z - fwdZ * a.blinkDist + fwdX * s * a.blinkSide, -34, 34),
+            };
+            if (blockedAt(to.x, to.y + 0.05, to.z, 0.4, 1.8)) continue;
             this.emit({ t: 'atk', id: e.id, a: 'blink', dur: 0.1, target: vv(e.pos) });
             e.pos = to;
             e.vel = { x: 0, y: 0, z: 0 };
             this.face(e, t.pos, 1, 100);
             this.setState(e, 'windup', a.windup + 0.1, 'slash');
             this.emit({ t: 'atk', id: e.id, a: 'slash', dur: a.windup + 0.1 });
+            break;
           }
-          e.blinkCd = a.blinkEvery * (0.8 + this.rand() * 0.5);
+          e.blinkCd = a.blinkEvery * (0.8 + this.rand() * 0.5) * (this.mopOn ? 0.5 : 1);
         }
         break;
       }
       case 'windup':
-        if (e.stateT > 0.12) this.face(e, t.pos, dt, 10);
-        this.physics(e, dt, 0, 0);
+        if (e.stateT > a.lungeTime) this.face(e, t.pos, dt, 10);
+        // the last instant of the telegraph is a committed lunge along the facing, closing the gap
+        if (e.stateT > a.lungeTime) this.physics(e, dt, 0, 0);
+        else this.physics(e, dt, -Math.sin(e.yaw) * a.lunge, -Math.cos(e.yaw) * a.lunge, 150);
         if (e.stateT <= 0) {
           this.strike(e, 1.5, 1.9, a.damage);
           this.setState(e, 'recover', 0.45);
@@ -1310,8 +1539,9 @@ export class GameSim {
         const dx = t.pos.x - e.pos.x, dz = t.pos.z - e.pos.z;
         const l = Math.hypot(dx, dz) || 1;
         let fwd = 0;
-        if (d > a.preferredMax) fwd = 1;
-        else if (d < a.preferredMin) fwd = -1;
+        // hunted stragglers close to a short range instead of sniping from afar
+        if (d > (this.mopOn ? 11 : a.preferredMax)) fwd = 1;
+        else if (d < (this.mopOn ? 5 : a.preferredMin)) fwd = -1;
         const sp = ENEMIES.warden.speed;
         if (this.rand() < dt * 0.3) e.strafeDir *= -1;
         this.physics(e, dt, ((dx / l) * fwd + (-dz / l) * e.strafeDir * 0.6) * sp, ((dz / l) * fwd + (dx / l) * e.strafeDir * 0.6) * sp);
@@ -1346,8 +1576,8 @@ export class GameSim {
     const tp = { x: t.pos.x, y: t.pos.y + 1.1, z: t.pos.z };
     this.face(e, tp, dt, 8);
     const ang = Math.atan2(e.pos.z - t.pos.z, e.pos.x - t.pos.x) + e.strafeDir * 0.6 * dt * 2;
-    const radius = 14 + Math.sin(this.time * 0.7 + e.id) * 3;
-    const want = { x: t.pos.x + Math.cos(ang) * radius, y: t.pos.y + 6 + Math.sin(this.time + e.id) * 1.5, z: t.pos.z + Math.sin(ang) * radius };
+    const radius = (this.mopOn ? 6 : 14) + Math.sin(this.time * 0.7 + e.id) * 3;
+    const want = { x: t.pos.x + Math.cos(ang) * radius, y: t.pos.y + (this.mopOn ? 2.5 : 6) + Math.sin(this.time + e.id) * 1.5, z: t.pos.z + Math.sin(ang) * radius };
     const sp = ENEMIES.drone.speed;
     const dx = want.x - e.pos.x, dy = want.y - e.pos.y, dz = want.z - e.pos.z;
     const l = Math.hypot(dx, dy, dz) || 1;
@@ -1392,10 +1622,8 @@ export class GameSim {
     switch (e.state) {
       case 'move': {
         this.face(e, t.pos, dt, 3);
-        const dx = t.pos.x - e.pos.x, dz = t.pos.z - e.pos.z;
-        const l = Math.hypot(dx, dz) || 1;
         const sp = ENEMIES.brute.speed * (d > 14 ? 1.3 : 1);
-        this.physics(e, dt, (dx / l) * sp, (dz / l) * sp, 12);
+        this.steer(e, dt, t.pos.x, t.pos.z, sp, 12);
         if (d < a.meleeRange && Math.abs(t.pos.y - e.pos.y) < 3) {
           this.setState(e, 'windup', 0.65, 'smash');
           this.emit({ t: 'atk', id: e.id, a: 'smash', dur: 0.65 });

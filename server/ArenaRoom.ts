@@ -54,6 +54,9 @@ export class ArenaRoom extends Room {
     this.onMessage('retry', (c: Client) => {
       if (c.sessionId === this.hostId) this.sim.retry();
     });
+    this.onMessage('continue', (c: Client) => {
+      if (c.sessionId === this.hostId) this.sim.continueEndless();
+    });
     this.onMessage('hello', (c: Client) => this.welcome(c));
     this.onMessage('ping', (c: Client, t: unknown) => c.send('pong', Number(t) || 0));
     rooms.set(this.roomId, () => ({

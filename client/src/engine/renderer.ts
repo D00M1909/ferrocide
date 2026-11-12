@@ -20,6 +20,8 @@ export class RetroRenderer {
   private postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private postMat: THREE.ShaderMaterial;
   internalHeight = 360;
+  /** Auto resolution: a multiplier on the internal height, lowered when the frame rate can't hold. */
+  scale = 1;
   readonly post: PostState = {
     flash: new THREE.Color(1, 1, 1),
     flashAmount: 0,
@@ -30,7 +32,8 @@ export class RetroRenderer {
   };
 
   constructor(canvas: HTMLCanvasElement) {
-    this.gl = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: false });
+    // the scene is drawn into its own target, so the canvas itself needs no depth, stencil or alpha
+    this.gl = new THREE.WebGLRenderer({ canvas, antialias: false, depth: false, stencil: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: false });
     this.gl.setPixelRatio(1);
     this.gl.outputColorSpace = THREE.SRGBColorSpace;
     this.gl.autoClear = false;
@@ -95,11 +98,18 @@ export class RetroRenderer {
   resize(): void {
     const w = window.innerWidth, h = window.innerHeight;
     this.gl.setSize(w, h, false);
-    const ih = this.internalHeight > 0 ? Math.min(this.internalHeight, h) : h;
+    const ih = this.targetHeight;
     const iw = Math.round((ih * w) / h);
     this.target.setSize(iw, ih);
     this.postMat.uniforms.uRes.value.set(iw, ih);
     psxUniforms.uSnap.value.set(iw / 2, ih / 2);
+  }
+
+  /** Height in pixels of the low-resolution image the world is drawn into. */
+  get targetHeight(): number {
+    const h = window.innerHeight;
+    const base = this.internalHeight > 0 ? Math.min(this.internalHeight, h) : h;
+    return Math.max(120, Math.round(base * this.scale));
   }
 
   /** The GPU the browser actually gave us (browsers on dual-GPU laptops often pick the weak one). */
